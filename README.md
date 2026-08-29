@@ -51,14 +51,20 @@ and — prominently — why anything is blocked.
 You never have to leave for the next question:
 
 ```
-> /new backoff Should retries use exponential backoff?
+> /new the workflow optimization in agentic AI software development
 > /mode work            # or debate / discuss
 > /manager claude       # who plans and reviews
 ```
 
-`/new` carries the seats, mode and effort over from where you are standing, because
-the common case is "same room, next question" — re-listing the council every time
-is the friction that sends you back to the shell.
+Just type the question. The short handle you see in `agora ls` and pass to
+`agora tui` is **derived from it** — that one becomes
+`workflow-optimization-in-agentic-ai` — because asking someone to invent a name for
+their own question before they can ask it is friction for nothing. Chinese titles
+keep their characters; collisions get a numeric suffix.
+
+`/new` carries the seats, mode and effort over from where you are standing: the
+common case is "same room, next question", and re-listing the council every time
+is what sends you back to the shell.
 
 Tidying up happens there too, in two steps, because one keystroke should not be
 able to destroy a conversation you cannot get back:

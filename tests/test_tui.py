@@ -148,10 +148,10 @@ async def test_a_new_topic_can_be_opened_without_leaving(tmp_path, board):
     app = app_for(tmp_path, board)
     async with app.run_test() as pilot:
         app.board.auto = False
-        await type_line(pilot, app, "/new backoff Should retries use exponential backoff?")
+        await type_line(pilot, app, "/new Should retries use exponential backoff?")
         await pilot.pause()
 
-        assert app.board.topic["slug"] == "backoff"
+        assert app.board.topic["slug"] == "should-retries-use-exponential-backoff"
         assert "backoff" in str(app.sub_title)
         # Seats carry over -- "same room, next question".
         seats = {s["agent"] for s in board.seats(app.board.topic_id)}
@@ -165,11 +165,11 @@ async def test_switching_topic_does_not_leave_the_old_transcript_behind(tmp_path
     async with app.run_test() as pilot:
         app.board.auto = False
         await pilot.pause()
-        await type_line(pilot, app, "/new second A different question")
+        await type_line(pilot, app, "/new A different question")
         await pilot.pause()
         # The cursor was reset, so the next tick must not replay history either.
         app.refresh_board()
-        assert app.board.topic["slug"] == "second"
+        assert app.board.topic["slug"] == "different-question"
 
 
 @pytest.mark.asyncio
@@ -239,10 +239,10 @@ async def test_the_session_opens_on_an_empty_board(tmp_path, board):
         assert app.board.topic_id is None
         assert "no topic" in str(app.sub_title)
 
-        await type_line(pilot, app, "/new first Should retries back off?")
+        await type_line(pilot, app, "/new Should retries back off?")
         await pilot.pause()
 
-        assert app.board.topic["slug"] == "first"
+        assert app.board.topic["slug"] == "should-retries-back-off"
         # A first topic seats everyone registered -- there was nothing to carry over.
         seats = {s["agent"] for s in board.seats(app.board.topic_id)}
         assert {"claude", "codex", "me"} <= seats
@@ -261,9 +261,9 @@ async def test_clearing_the_board_leaves_you_inside_it(tmp_path, board):
         assert app.board.topic_id is None, "should still be running, with no topic"
         assert "no topic" in str(app.sub_title)
 
-        await type_line(pilot, app, "/new fresh A brand new question")
+        await type_line(pilot, app, "/new A brand new question")
         await pilot.pause()
-        assert app.board.topic["slug"] == "fresh"
+        assert app.board.topic["slug"] == "brand-new-question"
 
 
 @pytest.mark.asyncio

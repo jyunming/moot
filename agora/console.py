@@ -40,7 +40,7 @@ import threading
 import time
 from pathlib import Path
 
-from .store import Store, StoreError, connect
+from .store import Store, StoreError, connect, slugify
 
 try:  # optional, but the difference between usable and not
     from prompt_toolkit import PromptSession
@@ -67,7 +67,7 @@ COMMANDS = {
     "/tasks": "the work plan and where each task has got to",
     "/seats": "who has budget left, who owes an answer",
     "/topic": "<slug> -- switch to another topic",
-    "/new": "<slug> <title> -- open a new topic here, same seats",
+    "/new": "<what you want to discuss> -- opens a topic, same seats",
     "/mode": "debate | discuss | work -- what kind of topic this is",
     "/manager": "<agent> -- who plans and reviews on a work topic",
     "/rm": "[slug] -- delete a topic; add `yes` to confirm",
@@ -486,12 +486,16 @@ class Console:
         common case is "same room, next question" -- and re-listing the council
         every time is the friction that sends you back to the shell.
         """
-        parts = rest.split(None, 1)
-        if len(parts) < 2:
-            self.emit(f"{RED}usage: /new <slug> <title>{RESET}   "
-                      f"{DIM}(seats and mode carry over; type the detail after){RESET}")
+        title = rest.strip()
+        if not title:
+            self.emit(f"{RED}usage: /new <what you want to discuss>{RESET}")
+            self.emit(f"{DIM}e.g.  /new workflow optimization in agentic AI development"
+                      f"{RESET}")
             return
-        slug, title = parts[0], parts[1].strip()
+        # The short handle is derived, not demanded. Asking someone to invent a
+        # name for their own question before they can ask it is friction for
+        # nothing -- the title is what they actually have.
+        slug = slugify(title, [t["slug"] for t in self.store.topics()])
         if self.topic_id is None:
             # Nothing to carry over: seat everyone registered, which is what a
             # first topic on a fresh board almost always wants.
@@ -515,8 +519,8 @@ class Console:
             self.emit(f"{RED}could not open `{slug}`: {exc}{RESET}")
             return
         self._switch(slug)
-        self.emit(f"{DIM}seats: {', '.join(seats)}. Type any detail they need, "
-                  f"then /run.{RESET}")
+        self.emit(f"{DIM}seats: {', '.join(seats)} — type any detail they need, "
+                  f"then /run{RESET}")
 
     def _mode(self, rest: str) -> None:
         if not self._require_topic():

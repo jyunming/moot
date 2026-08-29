@@ -461,3 +461,30 @@ def test_reset_clears_topics_but_keeps_the_seats_registry(board):
     assert board.clear_topics() == 2
     assert board.topics() == []
     assert {a["name"] for a in board.agents()} >= {"claude", "codex", "human"}
+
+
+def test_a_slug_is_derived_from_the_title(board):
+    """Nobody should have to invent a short name for their own question."""
+    from agora.store import slugify
+
+    assert slugify("The workflow optimization in agentic AI software development") \
+        == "workflow-optimization-in-agentic-ai"
+    assert slugify("Should webhook retries use exponential backoff?") \
+        == "should-webhook-retries-use-exponential"
+    # Chinese keeps its characters instead of slugifying to nothing.
+    assert slugify("分家時養贍田該算用益權還是耗用品？") == "分家時養贍田該算用益權還是耗用品"
+    # An all-numeric title would produce an unreachable slug, so it is prefixed.
+    assert slugify("2026") == "topic-2026"
+    # Never silently collide with an existing topic.
+    assert slugify("Retry policy", taken=["retry-policy", "retry-policy-2"]) == "retry-policy-3"
+
+
+def test_a_derived_slug_is_always_acceptable_to_open_topic(board):
+    """slugify and open_topic's validation must not disagree -- otherwise /new
+    composes a name the store then refuses."""
+    from agora.store import slugify
+
+    for title in ("2026", "!!!", "   spaces   everywhere   ", "分家", "The the the"):
+        slug = slugify(title, [t["slug"] for t in board.topics()])
+        board.open_topic(slug, title, "b", "human", seats=("claude",))
+    assert len(board.topics()) == 5

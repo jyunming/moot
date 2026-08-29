@@ -49,6 +49,50 @@ CAPABILITIES = frozenset({"deliberate", "execute"})
 MENTION_RE = re.compile(r"@([A-Za-z0-9_][A-Za-z0-9_-]*)")
 
 
+#: Leading noise words. Stripped only from the front, only these, deliberately --
+#: a clever slugifier that rewrites the middle of someone's sentence produces
+#: names they cannot predict, which is worse than a slightly long one.
+_LEADING_NOISE = ("the ", "a ", "an ", "on ", "about ", "how to ", "how ")
+
+
+def slugify(title: str, taken: Iterable[str] = ()) -> str:
+    """Derive a typeable handle from a title.
+
+    Nobody should have to invent a short name for their own question. The title
+    is the thing they actually have; the slug is a convenience for typing, so it
+    is computed rather than demanded.
+
+    Non-alphanumerics become separators and everything else is kept, so a Chinese
+    title keeps its characters instead of slugifying to nothing.
+    """
+    text = title.strip().lower()
+    for noise in _LEADING_NOISE:
+        if text.startswith(noise):
+            text = text[len(noise):]
+            break
+
+    out = "".join(ch if ch.isalnum() else "-" for ch in text)
+    words = [w for w in out.split("-") if w]
+
+    slug = ""
+    for w in words:
+        candidate = f"{slug}-{w}" if slug else w
+        if len(candidate) > 40:
+            break
+        slug = candidate
+    slug = slug or "topic"
+    if slug.isdigit():                 # would be read as a topic id
+        slug = f"topic-{slug}"
+
+    existing = set(taken)
+    if slug not in existing:
+        return slug
+    n = 2
+    while f"{slug}-{n}" in existing:
+        n += 1
+    return f"{slug}-{n}"
+
+
 class StoreError(RuntimeError):
     pass
 
