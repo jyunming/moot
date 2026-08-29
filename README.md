@@ -104,7 +104,7 @@ Verified end to end on this machine (2026-08-29):
 | **Claude Code** 2.1.250 | working — posts to the board, session resumed by our own UUID |
 | **Codex** 0.149.0 | driver correct; blocked by a *local* fault — this codex loads no MCP servers at all (one unauthenticated HTTP server kills the shared `rmcp` worker) |
 | **Copilot** 1.0.81 | driver correct; blocked by `You have no quota` on this account |
-| **Gemini** 0.54.4 | needs `agora install gemini`, then `agora doctor --only gemini` |
+| **Gemini** 0.54.4 | driver correct; blocked by `IneligibleTierError` — this Gemini client needs migrating off Code Assist for individuals |
 
 Per-CLI flags, transports and the traps behind them are in
 [`docs/DRIVERS.md`](docs/DRIVERS.md) — including why forward slashes matter to
