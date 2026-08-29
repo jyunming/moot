@@ -70,6 +70,8 @@ COMMANDS = {
     "/new": "<slug> <title> -- open a new topic here, same seats",
     "/mode": "debate | discuss | work -- what kind of topic this is",
     "/manager": "<agent> -- who plans and reviews on a work topic",
+    "/rm": "[slug] -- delete a topic; add `yes` to confirm",
+    "/reset": "clear every topic; add `yes` to confirm",
     "/help": "this list",
     "/quit": "leave (the board keeps everything)",
 }
@@ -252,7 +254,7 @@ class Console:
             "auto": self._auto,
             "proposals": self._proposals, "seats": self._seats, "topic": self._switch,
             "tasks": self._tasks, "new": self._new, "mode": self._mode,
-            "manager": self._manager,
+            "manager": self._manager, "rm": self._rm, "reset": self._reset,
         }.get(cmd)
         if cmd in {"approve", "reject"}:
             self._decide(cmd, rest)
@@ -359,6 +361,72 @@ class Console:
         for p in self.store.proposals(self.topic_id):
             votes = ", ".join(f"{v['agent']}:{v['stance']}" for v in self.store.votes(p["id"]))
             self.emit(f"  #{p['id']} [{p['status']}] {p['title']}  {DIM}{votes}{RESET}")
+
+    def _rm(self, rest: str) -> bool:
+        """Delete a topic. Two steps, because one keystroke should not be able to
+        destroy a conversation you cannot get back."""
+        words = rest.split()
+        confirmed = bool(words) and words[-1] == "yes"
+        if confirmed:
+            words = words[:-1]
+        ref = words[0] if words else self.topic["slug"]
+        try:
+            t = self.store.topic(int(ref) if ref.isdigit() else ref)
+        except StoreError as exc:
+            self.emit(f"{RED}{exc}{RESET}")
+            return True
+        tid = int(t["id"])
+        trees = self.store.orphan_worktrees(tid)
+
+        if not confirmed:
+            self.emit(f"{YELLOW}delete `{t['slug']}` — {t['title']}?{RESET}")
+            self.emit(f"  {len(self.store.transcript(tid))} message(s), "
+                      f"{len(self.store.tasks(tid))} task(s), "
+                      f"{len(self.store.proposals(tid))} proposal(s)")
+            for w in trees:
+                self.emit(f"  {DIM}leaves a worktree on disk: {w}{RESET}")
+            self.emit(f"{DIM}confirm with:  /rm {ref} yes{RESET}")
+            return True
+
+        was_current = tid == self.topic_id
+        self.store.delete_topic(tid)
+        self.emit(f"{DIM}deleted `{t['slug']}`{RESET}")
+        for w in trees:
+            self.emit(f"{DIM}  worktree left on disk — git worktree remove {w}{RESET}")
+        return self._land_somewhere() if was_current else True
+
+    def _reset(self, rest: str) -> bool:
+        topics = self.store.topics()
+        if rest.strip() != "yes":
+            self.emit(f"{YELLOW}clear all {len(topics)} topic(s)?{RESET}")
+            for t in topics[:10]:
+                self.emit(f"  {t['slug']:<20} {t['title'][:44]}")
+            if len(topics) > 10:
+                self.emit(f"  {DIM}… and {len(topics) - 10} more{RESET}")
+            self.emit(f"{DIM}seats are kept. confirm with:  /reset yes{RESET}")
+            return True
+        trees = [w for t in topics for w in self.store.orphan_worktrees(int(t["id"]))]
+        n = self.store.clear_topics()
+        self.emit(f"{DIM}cleared {n} topic(s){RESET}")
+        for w in trees:
+            self.emit(f"{DIM}  worktree left on disk — git worktree remove {w}{RESET}")
+        return self._land_somewhere()
+
+    def _land_somewhere(self) -> bool:
+        """After deleting what we were looking at, find somewhere to stand.
+
+        Returning False ends the session, which is the honest outcome when the
+        board is empty -- every other command needs a topic, and pretending to
+        still be on the deleted one would fail in confusing ways later.
+        """
+        rest = [t for t in self.store.topics() if t["status"] in {"open", "paused"}]
+        if rest:
+            self._switch(rest[0]["slug"])
+            return True
+        self.emit(f"{DIM}the board is empty. Start one with:  "
+                  f"/new <slug> <title>{RESET}")
+        self.emit(f"{DIM}(no topic to stand on, so this session ends){RESET}")
+        return False
 
     def _switch(self, rest: str) -> None:
         try:

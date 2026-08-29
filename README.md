@@ -60,6 +60,21 @@ You never have to leave for the next question:
 the common case is "same room, next question" — re-listing the council every time
 is the friction that sends you back to the shell.
 
+Tidying up happens there too, in two steps, because one keystroke should not be
+able to destroy a conversation you cannot get back:
+
+```
+> /rm                   # what would go, if you deleted this topic
+> /rm yes               # actually delete it — you land on the next topic
+> /rm doctor-codex yes  # or name one
+> /reset                # what would go, if you cleared the board
+> /reset yes            # clear every topic; seats are kept
+```
+
+Both report any task worktrees left on disk with the `git worktree remove` command
+— deleting a row does not delete the checkout, and silently orphaning a directory
+of someone's work would be a poor trade for a tidy board.
+
 **It is a view, not a second application.** Every command goes through the same
 `Console.handle()`; the TUI only changes where output lands and how the supervisor
 is started (a Textual worker on the app's own loop, rather than the REPL's thread).

@@ -184,3 +184,46 @@ async def test_mode_and_manager_can_be_set_in_session(tmp_path, board):
 
     assert board.topic("t")["mode"] == "work"
     assert board.is_manager(app.board.topic_id, "claude")
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_topic_needs_confirming(tmp_path, board):
+    """One keystroke should not be able to destroy a conversation."""
+    app = app_for(tmp_path, board)
+    board.open_topic("keeper", "Another", "b", "me", seats=("claude", "me"))
+    async with app.run_test() as pilot:
+        app.board.auto = False
+        await type_line(pilot, app, "/rm t")
+        assert board.topic("t"), "a bare /rm must not delete anything"
+
+        await type_line(pilot, app, "/rm t yes")
+        await pilot.pause()
+
+    with pytest.raises(Exception):
+        board.topic("t")
+
+
+@pytest.mark.asyncio
+async def test_deleting_the_topic_you_are_on_lands_you_somewhere(tmp_path, board):
+    app = app_for(tmp_path, board)
+    board.open_topic("keeper", "Another", "b", "me", seats=("claude", "me"))
+    async with app.run_test() as pilot:
+        app.board.auto = False
+        await type_line(pilot, app, "/rm yes")          # deletes the current topic
+        await pilot.pause()
+        assert app.board.topic["slug"] == "keeper"
+        assert "keeper" in str(app.sub_title), "the view did not follow"
+
+
+@pytest.mark.asyncio
+async def test_reset_needs_confirming_and_keeps_the_seats(tmp_path, board):
+    app = app_for(tmp_path, board)
+    async with app.run_test() as pilot:
+        app.board.auto = False
+        await type_line(pilot, app, "/reset")
+        assert board.topics(), "a bare /reset must not clear anything"
+        await type_line(pilot, app, "/reset yes")
+        await pilot.pause()
+
+    assert board.topics() == []
+    assert {a["name"] for a in board.agents()} >= {"claude", "codex"}
