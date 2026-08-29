@@ -237,6 +237,17 @@ class Store:
         effort: str | None = None,
         manager: str | None = None,
     ) -> int:
+        # A slug is looked up by name, but every reference site accepts an id too
+        # and decides which by `isdigit()`. So an all-numeric slug creates a topic
+        # that cannot be reached by its own name -- it resolves to a topic *id*
+        # that almost certainly does not exist. Refuse it at creation rather than
+        # let someone find out later.
+        if not slug or slug.strip() != slug or any(c.isspace() for c in slug):
+            raise StoreError(f"slug {slug!r} must be a single word with no spaces")
+        if slug.isdigit():
+            raise StoreError(
+                f"slug {slug!r} is all digits, which would be read as a topic id. "
+                "Give it a word -- e.g. `plans-2026`.")
         if mode not in TOPIC_MODES:
             raise StoreError(f"unknown mode {mode!r}; expected one of {sorted(TOPIC_MODES)}")
         with self.tx() as c:

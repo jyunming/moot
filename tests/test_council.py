@@ -426,3 +426,14 @@ def test_retuning_effort_mid_run_reaches_the_next_wake(board):
     asyncio.run(sup.wake_seat(topic, "claude"))
 
     assert got == ["low", "high"], f"mid-run retune did not reach the driver: {got}"
+
+
+def test_a_slug_that_would_be_unreachable_is_refused(board):
+    """Every reference site accepts a slug or an id and picks by isdigit(), so an
+    all-numeric slug makes a topic nobody can open by name."""
+    with pytest.raises(StoreError, match="topic id"):
+        board.open_topic("2026", "Plans", "brief", "human", seats=("claude",))
+    with pytest.raises(StoreError, match="single word"):
+        board.open_topic("my topic", "Plans", "brief", "human", seats=("claude",))
+    board.open_topic("plans-2026", "Plans", "brief", "human", seats=("claude",))
+    assert board.topic("plans-2026")["title"] == "Plans"
