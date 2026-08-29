@@ -349,7 +349,15 @@ class Store:
                    WHERE topic_id = ? AND target = ? AND answered_by IS NULL""",
                 (msg_id, topic_id, author),
             )
-            mentioned = self._record_mentions(c, topic_id, msg_id, author, body, mention_targets, body)
+            # System notes quote what people said -- a pause reason repeats the very
+            # question that caused it. Parsing @names out of that would ping the
+            # person a second time on the board's own behalf, so scanning is
+            # skipped unless a target was named explicitly.
+            mentioned = (
+                self._record_mentions(c, topic_id, msg_id, author, body, mention_targets, body)
+                if kind != "system" or mention_targets
+                else []
+            )
 
             ev = self._emit(c, topic_id, "message", author,
                             {"message_id": msg_id, "kind": kind, "preview": body[:280],

@@ -3,7 +3,7 @@ name = "agora"
 version = "0.0.1"
 description = "A council where agent CLIs from different vendors deliberate, and a human decides."
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["prompt_toolkit>=3.0"]
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.2"]

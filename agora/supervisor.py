@@ -129,14 +129,14 @@ class Supervisor:
                 # max_rounds was silently unenforced and only per-seat caps stopped
                 # the loop.
                 if not self._advance_round(topic_id):
-                    return "rounds_exhausted"
+                    return self._human_ask_reason(topic_id) or "rounds_exhausted"
                 continue
 
             speaker = speakers[0] if speakers else None
             if speaker is None:
                 # Everyone has spoken and nobody has anything new. Advance, or settle.
                 if not self._advance_round(topic_id):
-                    return "rounds_exhausted"
+                    return self._human_ask_reason(topic_id) or "rounds_exhausted"
                 continue
 
             await self.wake_seat(topic_id, speaker)
@@ -145,7 +145,9 @@ class Supervisor:
         """Tick the round counter. False means the topic is out of rounds."""
         topic = self.store.topic(topic_id)
         if topic["round"] + 1 >= topic["max_rounds"]:
-            self._park(topic_id, "rounds exhausted -- needs a human to extend or rule")
+            reason = (self._human_ask_reason(topic_id)
+                      or "rounds exhausted -- needs a human to extend or rule")
+            self._park(topic_id, reason)
             return False
         with self.store.tx() as c:
             c.execute("UPDATE topics SET round = round + 1 WHERE id = ?", (topic_id,))
@@ -242,6 +244,25 @@ class Supervisor:
                 ]
                 if not outstanding:
                     return f"proposal #{p['id']} ({p['title']!r}) awaits a human decision"
+
+        # A question put to a human does not stop the room mid-flight -- the others
+        # may still have things to say, and a brainstorming council should not
+        # stall on one ask.
+        if not self._eligible(topic_id):
+            return self._human_ask_reason(topic_id)
+        return None
+
+    def _human_ask_reason(self, topic_id: int) -> str | None:
+        """Why the council stopped, when what it is missing is *you*.
+
+        Once nobody else can proceed, an unanswered question addressed to a human
+        IS the reason the topic stopped. Reporting "rounds exhausted" instead
+        would bury the one thing that needs a person, which is the failure this
+        whole feature exists to prevent.
+        """
+        for m in self.store.open_mentions(topic_id):
+            if self.store.is_human(m["target"]):
+                return f"{m['asker']} is waiting on you: {m['question'].strip()[:200]}"
         return None
 
     def _eligible(self, topic_id: int) -> list[str]:

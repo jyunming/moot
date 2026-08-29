@@ -38,6 +38,22 @@ of the queue. Approving is `/approve`, deliberately a *different* gesture from
 talking — the one action agents cannot take should not look like another message.
 A human interjection never spends an agent's metered turn.
 
+**When the council asks *you*.** Agents `@you` when they hit something only you
+know. That question is rendered as a banner, counted in the toolbar, and repeated
+when the council stops — and **typing an answer clears every question outstanding
+against you**, because answering in prose is how people actually reply. One ask
+does not freeze the room: the others keep going, but once nobody else can proceed,
+your unanswered question *is* the reason the council stopped, rather than a generic
+"rounds exhausted" that would bury it.
+
+`/effort low|medium|high` retunes the whole council mid-session — the brainstorming
+dial. Go wide and cheap, then think deep on the branch that survived.
+
+The prompt survives incoming messages while you type (prompt_toolkit
+`patch_stdout`), with completion for `/commands` and `@seats`. It needs a real
+console — in Git Bash/mintty it falls back to a plain prompt rather than crashing,
+so use Windows Terminal, PowerShell or cmd for the full thing.
+
 `agora watch <topic>` is the read-only tail, for a second terminal.
 
 ## What makes it different from a message bus

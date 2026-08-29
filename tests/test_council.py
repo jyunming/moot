@@ -342,3 +342,64 @@ def test_effort_resolves_topic_over_seat_over_council(board):
     board.add_agent("codex", "codex", driver="spawn")               # no seat effort
     plain = board.open_topic("plain", "T", "B", "human", seats=("codex",))
     assert sup._effort_for(board.topic(plain), "codex") == "medium"
+
+
+# ------------------------------------------------ when the council asks the human
+
+def test_asking_a_human_does_not_stall_a_room_that_can_still_talk(board):
+    """A brainstorming council should not freeze because one seat asked you
+    something -- the others may still have things to say."""
+    topic = open_debate(board)
+    board.ask(topic, "claude", "human", "Where does the gateway config live?")
+
+    sup = Supervisor(board, {})
+    assert sup._eligible(topic), "other seats should still be free to speak"
+    assert sup._blocking_reason(topic) is None
+
+
+def test_the_unanswered_question_is_why_the_council_stopped(board):
+    """...but once nobody else can proceed, the ask is the reason -- not
+    'rounds exhausted', which would bury the one thing needing a person."""
+    topic = open_debate(board, max_rounds=1)
+    def asker(st, seat, prompt):
+        if seat.agent == "claude":
+            st.ask(seat.topic_id, seat.agent, "human", "Where does the gateway config live?")
+        return None            # the ask is already on the board; say nothing more
+
+    driver = FakeDriver(board, script=asker)
+    sup = Supervisor(board, {k: driver for k in ("claude", "codex", "gemini")},
+                     Caps(max_rounds=1, max_turns_per_seat=1))
+    reason = run(sup, topic)
+
+    assert "waiting on you" in reason and "gateway config" in reason
+    assert board.topic(topic)["status"] == "paused"
+
+
+def test_a_human_answer_clears_every_question_owed_by_them(board):
+    """Answering in prose is how people reply; requiring a special gesture would
+    leave stale asks forever."""
+    topic = open_debate(board)
+    board.ask(topic, "claude", "human", "Where is the engine?")
+    board.ask(topic, "codex", "human", "Which reading did you mean?")
+    assert len(board.open_mentions(topic, "human")) == 2
+
+    spent_before = {s["agent"]: s["turns_used"] for s in board.seats(topic)}
+    board.post(topic, "human", "engine/ in the other repo; I meant the second reading.",
+               count_turn=False)
+
+    assert board.open_mentions(topic, "human") == []
+    # Your answer costs nobody a turn. (The agents did spend one each to ask.)
+    assert {s["agent"]: s["turns_used"] for s in board.seats(topic)} == spent_before
+
+
+def test_a_system_note_quoting_a_question_does_not_ask_again(board):
+    """The pause note repeats the question that caused it. Scanning @names out of
+    that would ping the person a second time on the board's own behalf."""
+    topic = open_debate(board)
+    board.ask(topic, "claude", "human", "Where is the engine?")
+    assert len(board.open_mentions(topic, "human")) == 1
+
+    board.post(topic, "agora", "paused: claude is waiting on you: @human Where is the engine?",
+               kind="system", count_turn=False)
+
+    assert len(board.open_mentions(topic, "human")) == 1, "system note created a phantom ask"
