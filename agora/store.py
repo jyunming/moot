@@ -532,9 +532,16 @@ class Store:
 
 
 def connect(path: Path | str | None = None, *, init: bool = False) -> Store:
+    """Open the board, creating or migrating it as needed.
+
+    `init_schema` runs every time, not only for a new file. It is idempotent
+    (CREATE TABLE IF NOT EXISTS plus guarded ALTERs), and running it only on
+    creation is what makes a migration silently never happen: the column is added
+    to schema.sql, every existing board keeps working without it, and the failure
+    surfaces later as `table topics has no column named ...`.
+    """
     store = Store(path)
-    if init or not store.q1("SELECT name FROM sqlite_master WHERE type='table' AND name='topics'"):
-        store.init_schema()
+    store.init_schema()
     return store
 
 

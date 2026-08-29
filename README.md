@@ -63,6 +63,10 @@ On a real 10k-character council prompt:
 | one turn at default effort | **279 s** |
 | the same turn at `--effort low` | **31.8 s** |
 | process spawn + MCP handshake | ~5 s (≈2% of a default turn) |
+| **a real 3-vendor round** (claude + codex + agy, concurrent, `low`) | **29.9 s** |
+
+Against a sequential default-effort baseline of ~837 s for the same three seats,
+that is roughly **28x** — all of it from effort and concurrency, none from transport.
 
 Two conclusions, both counter-intuitive:
 
