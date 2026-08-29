@@ -97,6 +97,57 @@ def cmd_topic_new(args) -> int:
     return 0
 
 
+def cmd_topic_rm(args) -> int:
+    board = _board(args)
+    t = board.topic(int(args.slug) if args.slug.isdigit() else args.slug)
+    trees = board.orphan_worktrees(int(t["id"]))
+    if not args.yes:
+        print(f"would delete `{t['slug']}` — {t['title']}")
+        print(f"  {len(board.transcript(int(t['id'])))} message(s), "
+              f"{len(board.tasks(int(t['id'])))} task(s), "
+              f"{len(board.proposals(int(t['id'])))} proposal(s)")
+        for w in trees:
+            print(f"  leaves a worktree on disk: {w}")
+        print("re-run with --yes to actually delete it")
+        return 1
+    counts = board.delete_topic(int(t["id"]))
+    print(f"deleted `{t['slug']}` ({counts['messages']} messages, "
+          f"{counts['tasks']} tasks, {counts['proposals']} proposals)")
+    for w in trees:
+        print(f"  worktree left on disk: {w}")
+        print(f"    git worktree remove {w}")
+    return 0
+
+
+def cmd_reset(args) -> int:
+    """Clear the board. Seats survive unless you ask for everything."""
+    board = _board(args)
+    topics = board.topics()
+    trees = [w for t in topics for w in board.orphan_worktrees(int(t["id"]))]
+    if not args.yes:
+        print(f"would delete {len(topics)} topic(s) and all their messages, "
+              f"tasks and proposals:")
+        for t in topics[:12]:
+            print(f"  {t['slug']:<22} {t['title'][:44]}")
+        if len(topics) > 12:
+            print(f"  … and {len(topics) - 12} more")
+        if args.all:
+            print(f"and {len(board.agents())} registered seat(s)")
+        for w in trees:
+            print(f"  leaves a worktree on disk: {w}")
+        print("re-run with --yes to actually do it")
+        return 1
+    n = board.clear_topics()
+    print(f"cleared {n} topic(s)")
+    if args.all:
+        with board.tx() as c:
+            c.execute("DELETE FROM agents WHERE kind != 'human'")
+        print("removed every agent seat; human seats kept")
+    for w in trees:
+        print(f"  worktree left on disk: {w}  ->  git worktree remove {w}")
+    return 0
+
+
 def cmd_ls(args) -> int:
     board = _board(args)
     for t in board.topics(args.status):
@@ -366,6 +417,17 @@ def build_parser() -> argparse.ArgumentParser:
                         "other. work: a manager assigns tasks and the team does them")
     p.add_argument("--manager", help="work mode: the seat that plans and reviews")
     p.set_defaults(fn=cmd_topic_new)
+
+    p = tp.add_parser("rm", help="delete one topic and everything in it")
+    p.add_argument("slug")
+    p.add_argument("--yes", action="store_true", help="actually do it")
+    p.set_defaults(fn=cmd_topic_rm)
+
+    p = sub.add_parser("reset", help="clear every topic (seats are kept)")
+    p.add_argument("--all", action="store_true",
+                   help="also remove every agent seat, leaving a bare board")
+    p.add_argument("--yes", action="store_true", help="actually do it")
+    p.set_defaults(fn=cmd_reset)
 
     p = sub.add_parser("ls", help="list topics")
     p.add_argument("--status")

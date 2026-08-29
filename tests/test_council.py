@@ -437,3 +437,27 @@ def test_a_slug_that_would_be_unreachable_is_refused(board):
         board.open_topic("my topic", "Plans", "brief", "human", seats=("claude",))
     board.open_topic("plans-2026", "Plans", "brief", "human", seats=("claude",))
     assert board.topic("plans-2026")["title"] == "Plans"
+
+
+def test_deleting_a_topic_takes_its_contents_with_it(board):
+    topic = open_debate(board)
+    board.post(topic, "claude", "something")
+    board.propose(topic, "codex", "a proposal", "body")
+
+    counts = board.delete_topic(topic)
+
+    assert counts["messages"] and counts["proposals"]
+    assert board.transcript(topic) == []
+    assert board.proposals(topic) == []
+    assert board.q("SELECT * FROM seats WHERE topic_id = ?", (topic,)) == []
+    # wakes carry a topic_id but no foreign key, so the cascade misses them.
+    assert board.q("SELECT * FROM wakes WHERE topic_id = ?", (topic,)) == []
+
+
+def test_reset_clears_topics_but_keeps_the_seats_registry(board):
+    open_debate(board)
+    board.open_topic("another", "T", "B", "human", seats=("claude",))
+
+    assert board.clear_topics() == 2
+    assert board.topics() == []
+    assert {a["name"] for a in board.agents()} >= {"claude", "codex", "human"}

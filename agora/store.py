@@ -541,6 +541,39 @@ class Store:
                           f"plan approved - {released} task(s) assigned",
                           kind="system", count_turn=False)
 
+    def delete_topic(self, topic_id: int) -> dict[str, int]:
+        """Remove a topic and everything hanging off it.
+
+        Returns what was removed, because a delete that reports nothing leaves
+        you unsure whether it did anything. `wakes` is cleared by hand -- it
+        carries a topic_id but no foreign key, so the cascade does not reach it.
+        """
+        counts = {
+            "messages": len(self.transcript(topic_id)),
+            "tasks": len(self.tasks(topic_id)),
+            "proposals": len(self.proposals(topic_id)),
+        }
+        with self.tx() as c:
+            c.execute("DELETE FROM wakes WHERE topic_id = ?", (topic_id,))
+            c.execute("DELETE FROM topics WHERE id = ?", (topic_id,))
+        return counts
+
+    def orphan_worktrees(self, topic_id: int) -> list[str]:
+        """Task worktrees that deleting this topic would leave behind on disk.
+
+        Deleting the row does not delete the checkout, and silently orphaning a
+        directory full of someone's work would be a poor trade for tidiness.
+        """
+        return [t["worktree"] for t in self.tasks(topic_id)
+                if t["worktree"] and t["branch"]]
+
+    def clear_topics(self) -> int:
+        """Every topic and its contents. Seats registry survives."""
+        ids = [int(t["id"]) for t in self.topics()]
+        for tid in ids:
+            self.delete_topic(tid)
+        return len(ids)
+
     # -------------------------------------------------------------------- tasks
 
     def is_manager(self, topic_id: int, agent: str) -> bool:
