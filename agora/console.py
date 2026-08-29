@@ -66,7 +66,10 @@ COMMANDS = {
     "/proposals": "what is waiting on you",
     "/tasks": "the work plan and where each task has got to",
     "/seats": "who has budget left, who owes an answer",
-    "/topic": "<slug> -- switch topic",
+    "/topic": "<slug> -- switch to another topic",
+    "/new": "<slug> <title> -- open a new topic here, same seats",
+    "/mode": "debate | discuss | work -- what kind of topic this is",
+    "/manager": "<agent> -- who plans and reviews on a work topic",
     "/help": "this list",
     "/quit": "leave (the board keeps everything)",
 }
@@ -248,7 +251,8 @@ class Console:
             "effort": self._effort, "asks": self._asks, "nudge": self._nudge,
             "auto": self._auto,
             "proposals": self._proposals, "seats": self._seats, "topic": self._switch,
-            "tasks": self._tasks,
+            "tasks": self._tasks, "new": self._new, "mode": self._mode,
+            "manager": self._manager,
         }.get(cmd)
         if cmd in {"approve", "reject"}:
             self._decide(cmd, rest)
@@ -360,9 +364,71 @@ class Console:
         try:
             self.topic = self.store.topic(rest)
             self.topic_id = int(self.topic["id"])
-            self.emit(f"{DIM}now on `{self.topic['slug']}`{RESET}")
         except StoreError as exc:
             self.emit(f"{RED}{exc}{RESET}")
+            return
+        self.emit(f"{DIM}now on `{self.topic['slug']}` ({self.topic['mode']}){RESET}")
+        self.on_topic_change()
+
+    def _new(self, rest: str) -> None:
+        """Open a topic without leaving the session.
+
+        Seats, mode and effort carry over from where you are standing, because the
+        common case is "same room, next question" -- and re-listing the council
+        every time is the friction that sends you back to the shell.
+        """
+        parts = rest.split(None, 1)
+        if len(parts) < 2:
+            self.emit(f"{RED}usage: /new <slug> <title>{RESET}   "
+                      f"{DIM}(seats and mode carry over; type the detail after){RESET}")
+            return
+        slug, title = parts[0], parts[1].strip()
+        here = self.store.topic(self.topic_id)
+        seats = [s["agent"] for s in self.store.seats(self.topic_id)]
+        manager = next((s["agent"] for s in self.store.seats(self.topic_id)
+                        if s["role"] == "manager"), None)
+        try:
+            self.store.open_topic(slug, title, title, self.me, seats=seats,
+                                  mode=here["mode"], effort=here["effort"],
+                                  manager=manager)
+        except StoreError as exc:
+            self.emit(f"{RED}{exc}{RESET}")
+            return
+        except Exception as exc:   # UNIQUE on slug is the one people hit
+            self.emit(f"{RED}could not open `{slug}`: {exc}{RESET}")
+            return
+        self._switch(slug)
+        self.emit(f"{DIM}seats: {', '.join(seats)}. Type any detail they need, "
+                  f"then /run.{RESET}")
+
+    def _mode(self, rest: str) -> None:
+        if rest not in {"debate", "discuss", "work"}:
+            self.emit(f"  mode is {BOLD}{self.store.topic(self.topic_id)['mode']}{RESET}   "
+                      f"{DIM}/mode debate|discuss|work{RESET}")
+            return
+        if rest == "work" and not any(s["role"] == "manager"
+                                      for s in self.store.seats(self.topic_id)):
+            self.emit(f"{RED}work needs a manager: /manager <agent> first{RESET}")
+            return
+        with self.store.tx() as c:
+            c.execute("UPDATE topics SET mode = ? WHERE id = ?", (rest, self.topic_id))
+        self.emit(f"{DIM}mode → {rest}{RESET}")
+        self.on_topic_change()
+
+    def _manager(self, rest: str) -> None:
+        if not self.store.seat(self.topic_id, rest):
+            self.emit(f"{RED}{rest!r} holds no seat here{RESET}")
+            return
+        with self.store.tx() as c:
+            c.execute("UPDATE seats SET role = 'participant' WHERE topic_id = ?",
+                      (self.topic_id,))
+            c.execute("UPDATE seats SET role = 'manager' WHERE topic_id = ? AND agent = ?",
+                      (self.topic_id, rest))
+        self.emit(f"{DIM}{rest} is now the manager{RESET}")
+        self.on_topic_change()
+
+    def on_topic_change(self) -> None:
+        """Hook for a surface that has to repaint. The REPL has nothing to do."""
 
     def _nudge(self, agent: str) -> None:
         import asyncio

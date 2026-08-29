@@ -67,6 +67,10 @@ class Board(Console):
         self.app_ref.nudge(agent)
         self.emit(f"[dim]waking {agent}…[/dim]")
 
+    def on_topic_change(self) -> None:
+        """/new and /topic move the whole view, not just a variable."""
+        self.app_ref.rebind_topic()
+
 
 class AgoraApp(App):
     CSS = """
@@ -236,6 +240,21 @@ class AgoraApp(App):
         if props:
             bits.append(f"[yellow]{props} awaiting your ruling[/yellow]")
         self.query_one("#status", Static).update("  |  ".join(bits))
+
+    def rebind_topic(self) -> None:
+        """Repoint every pane at whatever topic the board is now on."""
+        t = self.board.store.topic(self.board.topic_id)
+        self.title = t["title"]
+        self.sub_title = f"{t['slug']} · {t['mode']}"
+        log = self.query_one("#transcript", RichLog)
+        log.clear()
+        for m in self.board.store.transcript(self.board.topic_id)[-40:]:
+            log.write(self._render_message(m))
+        for a in self.board.pending_asks():
+            log.write(self._render_ask(a["asker"], a["question"]))
+        # Fresh cursor, or the first tick would replay the new topic's history.
+        self.cursor = self.board.store.head()
+        self.refresh_board()
 
     # -------------------------------------------------------------- behaviour
 

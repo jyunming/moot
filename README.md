@@ -48,6 +48,18 @@ The same input talks, asks (`@codex …`), and rules (`/approve 3 …`). Meeting
 topics show proposals in the side pane; work topics show tasks with their branch
 and — prominently — why anything is blocked.
 
+You never have to leave for the next question:
+
+```
+> /new backoff Should retries use exponential backoff?
+> /mode work            # or debate / discuss
+> /manager claude       # who plans and reviews
+```
+
+`/new` carries the seats, mode and effort over from where you are standing, because
+the common case is "same room, next question" — re-listing the council every time
+is the friction that sends you back to the shell.
+
 **It is a view, not a second application.** Every command goes through the same
 `Console.handle()`; the TUI only changes where output lands and how the supervisor
 is started (a Textual worker on the app's own loop, rather than the REPL's thread).

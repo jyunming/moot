@@ -139,3 +139,48 @@ async def test_bracketed_agent_text_is_not_eaten_as_markup(tmp_path, board):
     rendered = AgoraApp._render_message(
         {"author": "claude", "kind": "say", "body": "see [balance.json] line [12]"})
     assert "[balance.json]" in rendered.replace("\\[", "[")
+
+
+@pytest.mark.asyncio
+async def test_a_new_topic_can_be_opened_without_leaving(tmp_path, board):
+    """The whole premise is one place; going back to the shell to start the next
+    question breaks it."""
+    app = app_for(tmp_path, board)
+    async with app.run_test() as pilot:
+        app.board.auto = False
+        await type_line(pilot, app, "/new backoff Should retries use exponential backoff?")
+        await pilot.pause()
+
+        assert app.board.topic["slug"] == "backoff"
+        assert "backoff" in str(app.sub_title)
+        # Seats carry over -- "same room, next question".
+        seats = {s["agent"] for s in board.seats(app.board.topic_id)}
+        assert seats == {"claude", "codex", "me"}
+
+
+@pytest.mark.asyncio
+async def test_switching_topic_does_not_leave_the_old_transcript_behind(tmp_path, board):
+    app = app_for(tmp_path, board)
+    board.post(app.board.topic_id, "claude", "OLD-TOPIC-CHATTER", count_turn=False)
+    async with app.run_test() as pilot:
+        app.board.auto = False
+        await pilot.pause()
+        await type_line(pilot, app, "/new second A different question")
+        await pilot.pause()
+        # The cursor was reset, so the next tick must not replay history either.
+        app.refresh_board()
+        assert app.board.topic["slug"] == "second"
+
+
+@pytest.mark.asyncio
+async def test_mode_and_manager_can_be_set_in_session(tmp_path, board):
+    app = app_for(tmp_path, board)
+    async with app.run_test() as pilot:
+        app.board.auto = False
+        await type_line(pilot, app, "/mode work")          # refused: no manager yet
+        assert board.topic("t")["mode"] == "debate"
+        await type_line(pilot, app, "/manager claude")
+        await type_line(pilot, app, "/mode work")
+
+    assert board.topic("t")["mode"] == "work"
+    assert board.is_manager(app.board.topic_id, "claude")
