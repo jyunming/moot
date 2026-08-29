@@ -21,7 +21,7 @@ from agora.supervisor import Caps, Supervisor
 @pytest.fixture()
 def board(tmp_path):
     s = connect(tmp_path / "board.db", init=True)
-    s.add_agent("human", "human", display="jyunming")
+    s.add_agent("human", "human", display="the arbiter")
     for name in ("claude", "codex", "gemini"):
         s.add_agent(name, name, driver="spawn")
     yield s
@@ -30,8 +30,8 @@ def board(tmp_path):
 
 def open_debate(board, **kw):
     return board.open_topic(
-        "water-rate", "Should 養贍田 be treated as 用益權?",
-        "Codex reads it as consumable. Copilot's research says usufruct. Decide.",
+        "retry-policy", "Should failed webhook deliveries use exponential backoff?",
+        "The gateway retries on a fixed 30s schedule. Ops says that stampedes on recovery. Decide.",
         "human", seats=("claude", "codex", "gemini", "human"), **kw,
     )
 
@@ -108,7 +108,7 @@ def test_hourly_wake_cap_counts_failures_too(board):
 
 def test_agent_cannot_decide_its_own_proposal(board):
     topic = open_debate(board)
-    pid = board.propose(topic, "codex", "Treat 養贍田 as usufruct", "Per R12 findings.")
+    pid = board.propose(topic, "codex", "Adopt exponential backoff with jitter", "Per the incident review.")
 
     with pytest.raises(NotAuthorised):
         board.decide(pid, "codex", approve=True)
@@ -120,10 +120,10 @@ def test_agent_cannot_decide_its_own_proposal(board):
 
 def test_human_decision_closes_the_proposal_and_lands_on_the_board(board):
     topic = open_debate(board)
-    pid = board.propose(topic, "codex", "Treat 養贍田 as usufruct", "Per R12 findings.")
+    pid = board.propose(topic, "codex", "Adopt exponential backoff with jitter", "Per the incident review.")
     board.vote(pid, "claude", "support", "Matches the sources I read.")
 
-    board.decide(pid, "human", approve=True, rationale="Agreed; update balance.json separately.")
+    board.decide(pid, "human", approve=True, rationale="Agreed; ship it behind a flag.")
 
     p = board.proposal(pid)
     assert (p["status"], p["decided_by"]) == ("approved", "human")
@@ -137,7 +137,7 @@ def test_debate_pauses_once_a_proposal_needs_a_human(board):
 
     def proposer(st, seat, prompt):
         if seat.agent == "codex" and not st.proposals(seat.topic_id):
-            st.propose(seat.topic_id, seat.agent, "Adopt usufruct reading", "Body.")
+            st.propose(seat.topic_id, seat.agent, "Adopt backoff with jitter", "Body.")
             return None
         return f"[{seat.agent}] I have read it."
 
@@ -189,7 +189,7 @@ def test_successful_wake_advances_the_cursor(board):
 def test_chinese_text_survives_the_round_trip(board):
     """cp950 is this machine's default codepage; the board must not care."""
     topic = open_debate(board)
-    body = "養贍田是用益權，不是耗用品——見 R12 §3。「同居共財」是第三條路。"
+    body = "重試一定要加抖動（jitter），否則恢復時會同時湧入——見事故報告 §3。"
     mid = board.post(topic, "claude", body)
 
     reopened = connect(board.path)
@@ -211,7 +211,7 @@ def test_at_mention_makes_the_target_answer_next(board):
     """A directed ask jumps the rotation. Waiting for someone's turn to come round
     is not what "@codex, what about X?" means."""
     topic = open_debate(board)
-    board.post(topic, "claude", "I think it is consumable. @gemini you read R08 — does that hold?")
+    board.post(topic, "claude", "Fixed interval is fine. @gemini you profiled the recovery — does that hold?")
 
     sup = Supervisor(board, {})
     assert sup._next_speaker(topic) == "gemini", "mention did not take priority"
@@ -227,7 +227,7 @@ def test_answering_discharges_the_mention(board):
     board.post(topic, "claude", "@gemini does that hold?")
     assert len(board.open_mentions(topic)) == 1
 
-    board.post(topic, "gemini", "No — R08 p.114 says otherwise.")
+    board.post(topic, "gemini", "No — the p99 recovery numbers say otherwise.")
     assert board.open_mentions(topic) == []
     assert Supervisor(board, {})._next_speaker(topic) != "gemini"
 

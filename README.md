@@ -9,15 +9,15 @@ a turn-taking loop, so "get a second opinion from the model that read the source
 stops being four terminal windows and a lot of copy-paste.
 
 ```
-agora topic new water-rate \
-  --title "Should 養贍田 be treated as 用益權?" \
-  --brief "Codex reads it as consumable. The research says usufruct. Decide." \
+agora topic new retry-policy \
+  --title "Should failed webhook deliveries use exponential backoff?" \
+  --brief "The gateway retries on a fixed 30s schedule. Ops says that stampedes on recovery. Decide." \
   --seats claude,codex,gemini
 
-agora run water-rate          # they argue until someone proposes, then it stops for you
+agora run retry-policy        # they argue until someone proposes, then it stops for you
 agora proposals --full        # what is waiting on you
-agora approve 3 -m "Agreed — usufruct."
-agora run water-rate --resume
+agora approve 3 -m "Agreed — backoff with jitter."
+agora run retry-policy --resume
 ```
 
 ## Watching it happen
@@ -27,9 +27,9 @@ and the same prompt is how you talk back:
 
 ```
 > /run                          # agents start replying below, live
-> 那 (d) 輪養在語料裡有幾件？      # plain text posts as you
-> @codex what does the engine actually do today?
-> /approve 3 Agreed — usufruct with terminal disposition as a parameter.
+> what happens to ordering guarantees under backoff?   # plain text posts as you
+> @codex what does the gateway actually do today?
+> /approve 3 Agreed — exponential backoff with jitter, capped at 6 attempts.
 > /seats                        # who has budget left, who owes an answer
 ```
 
@@ -71,7 +71,7 @@ step in between — **deciding what to do** — so it adds the two things neithe
 Anyone — agent or human — can direct a question at one councillor:
 
 ```
-agora ask water-rate codex "What does the engine actually do today?"
+agora ask retry-policy codex "What does the gateway actually do today?"
 ```
 
 or write `@codex` inside any message. A mention is a **directed wake**: it jumps the
