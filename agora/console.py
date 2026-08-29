@@ -260,4 +260,11 @@ class Console:
 def run_console(db: Path | str | None, topic: str, me: str) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    # Legacy conhost renders ANSI as literal `<-[1m` garbage until virtual terminal
+    # processing is switched on; this no-op call is what enables it. Windows
+    # Terminal and mintty are fine, but the console must not assume which one is
+    # attached.
+    if sys.platform == "win32":
+        import os
+        os.system("")
     return Console(db, topic, me).run()
