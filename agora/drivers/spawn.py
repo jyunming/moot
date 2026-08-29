@@ -126,7 +126,7 @@ class SpawnDriver(Driver):
         stdin = prompt if self.prompt_via_stdin else None
 
         try:
-            code, out, err = await self._run(argv, cwd=seat.cwd, stdin=stdin,
+            code, out, err = await self._run(argv, cwd=self.working_dir(seat), stdin=stdin,
                                              timeout=self.timeout_s)
         except asyncio.TimeoutError:
             return WakeResult.failure(f"{self.binary} exceeded {self.timeout_s}s")
@@ -176,8 +176,27 @@ class ClaudeDriver(SpawnDriver):
 # ------------------------------------------------------------------------- Codex
 
 class CodexDriver(SpawnDriver):
-    """`codex exec` for the first turn, `codex exec resume <id>` after. Codex
-    assigns the session id, so it is captured from output and persisted."""
+    """The one adapter whose containment comes from *where* it runs, not a flag.
+
+    Codex offers no way to auto-approve MCP calls while staying read-only, and it
+    is not for want of looking -- all of this was measured, not assumed:
+
+      * `--sandbox read-only` blocks writes, but then every MCP call is refused
+        ("approval policy is never"), so the seat cannot reach the board at all.
+      * `--approve-for-me` lets MCP through, but its own help says it reviews
+        approvals *using the workspace-write sandbox* -- and it does: instructed
+        to write a file, a seat wrote it.
+      * The two are mutually exclusive at the flag level, `-c sandbox_mode=` does
+        not override it (verified: the file was still written), and no per-server
+        trust/approval key is exposed.
+
+    So a `deliberate` codex seat runs with its cwd pointed at an empty scratch
+    directory. Workspace-write is then real but has nothing to reach. The cost is
+    honest and worth stating: **that seat cannot read the repo**, which a council
+    convened over a codebase may well want. Grant `--capability execute` (only
+    honoured on work topics) or set `--arg` deliberately if you would rather have
+    the reads and accept the write access.
+    """
     binary = "codex"
     prompt_via_stdin = True
     #: Stateless, and the two facts force each other. The prompt must arrive on
@@ -222,6 +241,14 @@ class CodexDriver(SpawnDriver):
     def effort_argv(self, seat: Seat) -> list[str]:
         # `codex exec` has no --effort; the reasoning level is a config override.
         return ["-c", f'model_reasoning_effort="{seat.effort}"'] if seat.effort else []
+
+    def working_dir(self, seat: Seat) -> str:
+        """Empty scratch dir for deliberation; the real cwd only when executing."""
+        if seat.cfg.get("capability") == "execute":
+            return seat.cwd
+        sandbox = Path(self.db).parent / "sandbox" / seat.agent
+        sandbox.mkdir(parents=True, exist_ok=True)
+        return str(sandbox)
 
     _SESSION_LINE = re.compile(r"session id:\s*([0-9a-f-]{16,})", re.I)
 

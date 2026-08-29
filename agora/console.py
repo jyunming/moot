@@ -59,6 +59,7 @@ COMMANDS = {
     "/stop": "stop driving after the current turn",
     "/effort": "low | medium | high -- how hard the whole council thinks",
     "/asks": "questions waiting on you",
+    "/auto": "on | off -- whether posting wakes the council (default on)",
     "/nudge": "wake one seat by hand",
     "/approve": "<id> [why] -- rule on a proposal (only you can)",
     "/reject": "<id> [why]",
@@ -146,6 +147,11 @@ class Console:
         self.me = me
         self.stop = threading.Event()
         self.driving = threading.Event()
+        #: Posting wakes the council without you typing /run. This is the whole
+        #: difference between a meeting and a batch job: you say something, they
+        #: pick it up, you see the replies, you answer again. /auto off restores
+        #: the explicit-only behaviour.
+        self.auto = True
 
     # ------------------------------------------------------------------- state
 
@@ -162,7 +168,13 @@ class Console:
         asks = len(self.pending_asks())
         props = len(self.store.proposals(self.topic_id, status="open"))
         bits = [f" {self.topic['slug']}", f"effort {self.effort()}"]
-        bits.append("driving" if self.driving.is_set() else "idle")
+        # Live, because the toolbar re-renders on a timer: you can watch a seat
+        # think instead of wondering whether anything is happening.
+        thinking = [f"{w['agent']} {w['secs']}s" for w in self.store.active_wakes(self.topic_id)]
+        if thinking:
+            bits.append("thinking: " + ", ".join(thinking))
+        else:
+            bits.append("driving" if self.driving.is_set() else "idle")
         if asks:
             bits.append(f"{asks} question(s) for you")
         if props:
@@ -229,6 +241,7 @@ class Console:
             "quit": lambda _: False, "q": lambda _: False, "exit": lambda _: False,
             "help": self._help, "run": self._run, "stop": self._stop,
             "effort": self._effort, "asks": self._asks, "nudge": self._nudge,
+            "auto": self._auto,
             "proposals": self._proposals, "seats": self._seats, "topic": self._switch,
         }.get(cmd)
         if cmd in {"approve", "reject"}:
@@ -257,9 +270,14 @@ class Console:
         self.store.post(self.topic_id, self.me, line, count_turn=False)
         if answered:
             who = ", ".join(sorted({a["asker"] for a in answered}))
-            print(f"{DIM}posted — answers {who}; they see it on their next turn{RESET}")
-            if not self.driving.is_set():
-                print(f"{DIM}the council is idle: /run to let them pick it up{RESET}")
+            print(f"{DIM}answers {who}{RESET}")
+        if self.auto and not self.driving.is_set():
+            # What you just said is new board state, so every seat is behind again
+            # and the council has something to react to. Making you type /run here
+            # is what made this feel like a batch job rather than a conversation.
+            self._run("")
+        elif not self.driving.is_set():
+            print(f"{DIM}council idle — /run when you want them to pick it up{RESET}")
         return True
 
     def _help(self, _: str) -> None:
@@ -272,7 +290,12 @@ class Console:
             return
         self.driving.set()
         threading.Thread(target=self._drive, daemon=True).start()
-        print(f"{DIM}driving at effort {self.effort()} — keep typing to interject{RESET}")
+        print(f"{DIM}· council thinking at effort {self.effort()} — keep typing{RESET}")
+
+    def _auto(self, rest: str) -> None:
+        if rest in {"on", "off"}:
+            self.auto = rest == "on"
+        print(f"{DIM}auto-wake {'on — posting resumes the council' if self.auto else 'off — /run to drive'}{RESET}")
 
     def _stop(self, _: str) -> None:
         self.store.set_topic_status(self.topic_id, "paused", self.me, "stopped from console")
@@ -396,7 +419,10 @@ class Console:
 
     def _ptk_loop(self) -> None:  # pragma: no cover - interactive
         completer = _ConsoleCompleter(self)
-        session = PromptSession(completer=completer, complete_while_typing=False)
+        # refresh_interval keeps the toolbar live, so "claude thinking 14s" ticks
+        # up while you wait rather than freezing until your next keystroke.
+        session = PromptSession(completer=completer, complete_while_typing=False,
+                                refresh_interval=1.0)
         # patch_stdout is the whole point: the poller thread's prints land *above*
         # the prompt instead of through the middle of what you are typing.
         with patch_stdout(raw=True):

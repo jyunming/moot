@@ -50,6 +50,11 @@ class Seat:
     def cwd(self) -> str:
         return self.cfg.get("cwd") or os.getcwd()
 
+    @property
+    def capability(self) -> str:
+        """`deliberate` (default) or `execute`. Never inferred from the topic."""
+        return self.cfg.get("capability", "deliberate")
+
 
 @dataclass
 class WakeResult:
@@ -77,6 +82,10 @@ class Driver(abc.ABC):
     #: Wall-clock ceiling for one turn. A CLI that hangs must not hold a topic
     #: hostage -- on timeout the supervisor records the wake and moves on.
     timeout_s: float = 300.0
+
+    def working_dir(self, seat: Seat) -> str:
+        """Where this CLI actually runs. Overridden where cwd IS the containment."""
+        return seat.cwd
 
     @abc.abstractmethod
     async def wake(self, seat: Seat, prompt: str) -> WakeResult:

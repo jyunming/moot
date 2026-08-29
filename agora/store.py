@@ -38,6 +38,12 @@ DRIVER_KINDS = frozenset({"stdio_json", "acp", "spawn", "none"})
 #: it matters: a seat told disagreement is the product will invent some.
 TOPIC_MODES = frozenset({"debate", "discuss"})
 
+#: What a seat may do. `deliberate` seats argue and propose; they must not be able
+#: to change anything. `execute` is an explicit escalation the user grants at
+#: registration -- an agent woken by a daemon with shell access is a different risk
+#: class from one a person is watching, so it is never inferred.
+CAPABILITIES = frozenset({"deliberate", "execute"})
+
 #: `@name` in a message body. Restricted to seats on the topic; see
 #: Store._record_mentions for why an unseated name stays plain text.
 MENTION_RE = re.compile(r"@([A-Za-z0-9_][A-Za-z0-9_-]*)")
@@ -528,6 +534,16 @@ class Store:
                 "UPDATE wakes SET outcome = ?, detail = ?, ended_at = datetime('now') WHERE id = ?",
                 (outcome, detail[:2000], wake_id),
             )
+
+    def active_wakes(self, topic_id: int) -> list[sqlite3.Row]:
+        """Seats currently mid-turn, for a live status line. Reads the same ledger
+        the cost caps use, so it cannot disagree with what actually ran."""
+        return self.q(
+            """SELECT agent, started_at,
+                      CAST((julianday('now') - julianday(started_at)) * 86400 AS INTEGER) AS secs
+               FROM wakes WHERE topic_id = ? AND outcome = 'pending' ORDER BY id""",
+            (topic_id,),
+        )
 
     def wakes_in_last_hour(self, agent: str) -> int:
         """Metered CLIs charge for a failed wake too, so this counts attempts,
