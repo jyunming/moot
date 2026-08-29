@@ -1,0 +1,123 @@
+"""Driver interface: how the supervisor wakes one seat.
+
+The key simplification, and the reason this interface is small:
+
+    A driver does NOT carry the agent's reply back.
+
+The agent posts to the board itself, through the Agora MCP tools it was given.
+The driver's only jobs are (a) deliver a prompt into the right CLI session,
+(b) know when that turn is over, (c) capture the CLI's session identifier so the
+next wake resumes the same conversation. Content never flows through here.
+
+That matters because the four CLIs disagree about everything else. Their output
+formats differ, their session semantics differ, and only two of them speak ACP
+(see docs/DRIVERS.md). If the driver had to extract the reply, every adapter
+would need an output parser that breaks on the next CLI release. It doesn't, so
+they don't.
+
+Consequence worth stating: a wake that fails is not a lost message. The seat's
+`last_seen` cursor is untouched, so the agent catches up on whatever wakes it
+next -- including a human running `agora nudge`. The board is the substrate;
+this whole module is an accelerator.
+"""
+
+from __future__ import annotations
+
+import abc
+import asyncio
+import os
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass(frozen=True)
+class Seat:
+    """Everything a driver needs to reach one agent, flattened out of the DB."""
+    topic_id: int
+    topic_slug: str
+    agent: str
+    kind: str                       # claude|codex|copilot|gemini|...
+    cli_session: str | None
+    cfg: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def cwd(self) -> str:
+        return self.cfg.get("cwd") or os.getcwd()
+
+
+@dataclass
+class WakeResult:
+    ok: bool
+    cli_session: str | None = None
+    detail: str = ""
+    #: Raw tail of the CLI's output. Diagnostics only -- never parsed for content.
+    tail: str = ""
+
+    @classmethod
+    def failure(cls, detail: str, tail: str = "") -> "WakeResult":
+        return cls(ok=False, detail=detail, tail=tail[-2000:])
+
+
+class Driver(abc.ABC):
+    """One adapter per CLI transport style.
+
+    Implementations must be safe to call concurrently for *different* seats.
+    The supervisor serialises wakes per seat; it does not serialise across seats.
+    """
+
+    #: stdio_json | acp | spawn | none
+    kind: str = "none"
+
+    #: Wall-clock ceiling for one turn. A CLI that hangs must not hold a topic
+    #: hostage -- on timeout the supervisor records the wake and moves on.
+    timeout_s: float = 300.0
+
+    @abc.abstractmethod
+    async def wake(self, seat: Seat, prompt: str) -> WakeResult:
+        """Deliver `prompt` to `seat`'s session and return when the turn ends."""
+
+    async def close(self, seat: Seat) -> None:
+        """Release any long-lived process held for this seat. Default: nothing."""
+        return None
+
+    # ---------------------------------------------------------------- utilities
+
+    async def _run(
+        self,
+        argv: list[str],
+        *,
+        cwd: str,
+        stdin: str | None = None,
+        timeout: float | None = None,
+    ) -> tuple[int, str, str]:
+        """Run a CLI to completion with UTF-8 pinned in both directions.
+
+        The default codepage on this machine is cp950 and council traffic is
+        Chinese from day one. Decoding a UTF-8 subprocess pipe as cp950 produces
+        mojibake that reads like protocol corruption, so the encoding is forced
+        here rather than left to the platform default -- and `errors="replace"`
+        keeps a stray byte from raising instead of degrading.
+        """
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=cwd,
+            env=env,
+            stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        payload = stdin.encode("utf-8") if stdin is not None else None
+        try:
+            out, err = await asyncio.wait_for(
+                proc.communicate(payload), timeout=timeout or self.timeout_s
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise
+        return (
+            proc.returncode or 0,
+            out.decode("utf-8", errors="replace"),
+            err.decode("utf-8", errors="replace"),
+        )

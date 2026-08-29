@@ -1,0 +1,275 @@
+"""Spawn-per-turn adapters for the four CLIs.
+
+All four are the same shape -- build argv, run to completion, let the agent post
+through its own Agora MCP tools -- and differ only in flags. So they share a base
+and contribute an `argv()` each, rather than being four hand-written subprocess
+dances that drift apart.
+
+## Session continuity is optional, and that is a feature
+
+Claude, Codex and Copilot can resume a specific prior session by id. Gemini cannot:
+its `--resume` takes `latest` or an index, not the UUID that `--session-id`
+accepts, and "latest" races the moment one CLI holds seats on two topics.
+
+The fix is not to fight it. **The board is the shared memory.** A stateless seat is
+handed its catch-up excerpt in the prompt and reconstructs context from the record
+every turn -- which cannot drift from what was actually said, unlike a long-lived
+session. Continuity buys fewer input tokens, nothing else. `stateful=False` is a
+supported mode, not a degraded one.
+
+## Blast radius
+
+v0 seats deliberate; they do not edit files. Each adapter therefore asks its CLI
+for the narrowest tool surface it offers, and `--tool-policy` is where that per-CLI
+decision lives so it is reviewable in one place instead of scattered through argv
+builders. The flags differ in strength, and honestly: Claude's `--strict-mcp-config`
+plus an allowlist is the tightest; Copilot's and Gemini's are weaker. `agora doctor`
+verifies the restriction empirically rather than trusting that a flag did what its
+name suggests.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+import shutil
+import sys
+from pathlib import Path
+
+from .base import Driver, Seat, WakeResult
+
+#: Emitted by `codex exec --json` and friends; also matches Claude's session id.
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+
+
+def agora_mcp_config(agent: str, db: Path | str) -> dict:
+    """The MCP server block handed to a CLI so it can reach the board.
+
+    Injected per-run where the CLI supports it (Claude, Copilot), so participating
+    in a council never mutates that CLI's global config.
+    """
+    return {
+        "mcpServers": {
+            "agora": {
+                "command": sys.executable,
+                "args": ["-X", "utf8", "-m", "agora.mcp_server",
+                         "--agent", agent, "--db", str(db)],
+                "env": {"PYTHONUTF8": "1", "AGORA_AGENT": agent, "AGORA_DB": str(db)},
+            }
+        }
+    }
+
+
+class SpawnDriver(Driver):
+    kind = "spawn"
+
+    #: Can this CLI resume a session we name? See the module docstring.
+    stateful: bool = False
+    #: argv[0]; overridable for testing or for a non-PATH install.
+    binary: str = ""
+
+    def __init__(self, db: Path | str, *, timeout_s: float = 300.0, extra_argv: list[str] | None = None):
+        self.db = str(db)
+        self.timeout_s = timeout_s
+        self.extra_argv = extra_argv or []
+
+    # -------------------------------------------------------------- per-CLI API
+
+    def argv(self, seat: Seat, prompt: str, session: str | None) -> list[str]:
+        raise NotImplementedError
+
+    def new_session(self, seat: Seat) -> str | None:
+        """Session id to use when there is no prior one. None = CLI assigns it."""
+        return None
+
+    def extract_session(self, stdout: str, stderr: str, proposed: str | None) -> str | None:
+        if proposed:
+            return proposed
+        m = _UUID.search(stdout) or _UUID.search(stderr)
+        return m.group(0) if m else None
+
+    def resolve_binary(self) -> str:
+        """Full path to the executable, because a bare name is not enough on Windows.
+
+        Three of these four CLIs install as npm/winget shims -- `codex.cmd`,
+        `gemini.cmd`. `shutil.which` finds them via PATHEXT, but the Windows
+        `CreateProcess` that `create_subprocess_exec` calls does not apply PATHEXT,
+        so a bare "codex" raises FileNotFoundError while `codex --version` works
+        fine in a shell. The failure reads as "CLI not installed" and is not.
+        """
+        return shutil.which(self.binary) or self.binary
+
+    # ------------------------------------------------------------------- driving
+
+    async def wake(self, seat: Seat, prompt: str) -> WakeResult:
+        session = seat.cli_session if self.stateful else None
+        proposed = session or (self.new_session(seat) if self.stateful else None)
+        argv = self.argv(seat, prompt, proposed)
+        argv[0] = self.resolve_binary()
+
+        try:
+            code, out, err = await self._run(argv, cwd=seat.cwd, timeout=self.timeout_s)
+        except asyncio.TimeoutError:
+            return WakeResult.failure(f"{self.binary} exceeded {self.timeout_s}s")
+        except FileNotFoundError:
+            return WakeResult.failure(f"{self.binary} is not on PATH")
+
+        tail = (out[-4000:] + ("\n[stderr]\n" + err[-2000:] if err.strip() else ""))
+        if code != 0:
+            return WakeResult.failure(f"{self.binary} exited {code}: {err.strip()[:300]}", tail)
+        return WakeResult(
+            ok=True,
+            cli_session=self.extract_session(out, err, proposed) if self.stateful else None,
+            tail=tail,
+        )
+
+
+# ------------------------------------------------------------------------ Claude
+
+class ClaudeDriver(SpawnDriver):
+    """Best-equipped of the four: resume by our own UUID, per-run MCP injection,
+    and `--strict-mcp-config` to guarantee no other server is in scope."""
+    binary = "claude"
+    stateful = True
+
+    def new_session(self, seat: Seat) -> str:
+        import uuid
+        return str(uuid.uuid4())
+
+    def argv(self, seat: Seat, prompt: str, session: str | None) -> list[str]:
+        cfg = json.dumps(agora_mcp_config(seat.agent, self.db), ensure_ascii=False)
+        argv = [
+            self.binary, "-p", prompt,
+            "--mcp-config", cfg,
+            "--strict-mcp-config",       # nothing but Agora; no inherited servers
+            "--allowedTools", "mcp__agora",
+            "--permission-mode", "manual",
+            "--output-format", "json",
+        ]
+        # Reuse the same session id across turns: first run creates it, later runs
+        # resume it. Never --continue, which would race across topics.
+        argv += ["--resume", session] if seat.cli_session else ["--session-id", session or ""]
+        argv += self.extra_argv
+        return [a for a in argv if a != ""]
+
+
+# ------------------------------------------------------------------------- Codex
+
+class CodexDriver(SpawnDriver):
+    """`codex exec` for the first turn, `codex exec resume <id>` after. Codex
+    assigns the session id, so it is captured from output and persisted."""
+    binary = "codex"
+    stateful = True
+
+    def argv(self, seat: Seat, prompt: str, session: str | None) -> list[str]:
+        # No `-c mcp_servers...` injection here, and two reasons why not, both
+        # found by probing rather than by reading docs:
+        #   1. `-c key=value` parses the value as TOML and silently falls back to a
+        #      raw string on failure -- after un-escaping `\\`, so a Windows path
+        #      turns `\d` into an invalid escape and the args array arrives as a
+        #      string ("expected a sequence").
+        #   2. Even with that fixed via forward slashes, a server introduced *only*
+        #      by `-c` is not launched. It must exist in the config file.
+        # Both failures look identical from outside: a clean exit that posts
+        # nothing. So codex is registered once via `agora install` instead.
+        if seat.cli_session:
+            return [self.binary, "exec", "resume", seat.cli_session, prompt,
+                    "--json", *self.extra_argv]
+        return [self.binary, "exec", prompt, "--json", *self.extra_argv]
+
+    def extract_session(self, stdout: str, stderr: str, proposed: str | None) -> str | None:
+        # --json emits a stream of events; the session id appears in the first.
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            for key in ("session_id", "conversation_id", "thread_id", "id"):
+                val = obj.get(key) or (obj.get("msg") or {}).get(key)
+                if isinstance(val, str) and _UUID.fullmatch(val):
+                    return val
+        return super().extract_session(stdout, stderr, proposed)
+
+
+# ----------------------------------------------------------------------- Copilot
+
+class CopilotDriver(SpawnDriver):
+    """Resumes by id via `-r/--resume=<session-id>`.
+
+    Not `--continue`, which means "most recent session" and is wrong the moment
+    this CLI holds seats on two topics. `--resume=<id>` does not appear in the
+    flag list under a `--continue` grep -- it is in the examples block -- and the
+    id is printed on the run's own summary line, which is where it is captured.
+
+    `--allow-all-tools` is mandatory for `-p`, so the surface is narrowed by
+    disabling built-in servers and denying the dangerous tools instead of by an
+    allowlist. That is weaker than Claude's `--strict-mcp-config`; `agora doctor`
+    is what confirms the seat can only reach the board.
+    """
+    binary = "copilot"
+    stateful = True
+
+    _RESUME = re.compile(r"--resume=([0-9a-f-]{16,})", re.I)
+
+    def argv(self, seat: Seat, prompt: str, session: str | None) -> list[str]:
+        cfg = json.dumps(agora_mcp_config(seat.agent, self.db), ensure_ascii=False)
+        argv = [
+            self.binary,
+            "-p", prompt,
+            "--additional-mcp-config", cfg,
+            "--disable-builtin-mcps",     # no github-mcp-server in a debate seat
+            "--allow-all-tools",          # required for non-interactive; narrowed below
+            "--deny-tool", "shell",
+            "--deny-tool", "write",
+            "--no-ask-user",              # nothing is watching; never block on a question
+            "--no-color",
+        ]
+        if seat.cli_session:
+            argv.append(f"--resume={seat.cli_session}")
+        else:
+            argv += ["-n", f"agora-{seat.topic_slug}-{seat.agent}"]
+        return argv + self.extra_argv
+
+    def extract_session(self, stdout: str, stderr: str, proposed: str | None) -> str | None:
+        m = self._RESUME.search(stdout) or self._RESUME.search(stderr)
+        if m:
+            return m.group(1)
+        return super().extract_session(stdout, stderr, proposed)
+
+
+# ------------------------------------------------------------------------ Gemini
+
+class GeminiDriver(SpawnDriver):
+    """Stateless: `--session-id` starts a *new* session with our UUID, and
+    `--resume` wants `latest` or an index, so there is no resume-by-id to use.
+    `--approval-mode plan` is the read-only mode -- the right posture for a seat
+    that deliberates and must not edit files.
+
+    Gemini has no per-run MCP injection, so `agora doctor` checks that the server
+    is registered (`gemini mcp add agora ...`) instead of injecting it here."""
+    binary = "gemini"
+    stateful = False
+
+    def argv(self, seat: Seat, prompt: str, session: str | None) -> list[str]:
+        import uuid
+        return [
+            self.binary,
+            "-p", prompt,
+            "--session-id", str(uuid.uuid4()),
+            "--approval-mode", "plan",          # read-only; deliberation, not edits
+            "--allowed-mcp-server-names", f"agora-{seat.agent}",
+            "-o", "text",
+            *self.extra_argv,
+        ]
+
+
+DRIVER_CLASSES = {
+    "claude": ClaudeDriver,
+    "codex": CodexDriver,
+    "copilot": CopilotDriver,
+    "gemini": GeminiDriver,
+}

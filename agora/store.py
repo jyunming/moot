@@ -1,0 +1,527 @@
+"""SQLite-backed council board.
+
+Every process in Agora -- the MCP server each agent CLI spawns for itself, the
+supervisor, the human UI -- talks to one file through this module. There is no
+server-of-record and no daemon requirement: if nothing else is running, the board
+is still readable and writable, which is what lets a failed wake degrade to
+catch-up-on-next-turn instead of deadlocking a topic.
+
+Encoding: this runs on a machine whose console codepage is cp950 and whose
+council will carry Chinese text from day one. Every text boundary in this project
+is pinned to UTF-8 explicitly. Mojibake at a protocol boundary reads as protocol
+corruption and costs a day to diagnose.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sqlite3
+import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable, Iterator, Sequence
+
+SCHEMA = Path(__file__).with_name("schema.sql")
+
+#: Kinds that may close a proposal. Enforced in code because the whole point of
+#: the platform is that a human holds the decision, and a prompt instruction
+#: telling an agent "don't approve your own proposal" is advice, not a fence.
+HUMAN_KINDS = frozenset({"human"})
+
+DRIVER_KINDS = frozenset({"stdio_json", "acp", "spawn", "none"})
+
+#: `@name` in a message body. Restricted to seats on the topic; see
+#: Store._record_mentions for why an unseated name stays plain text.
+MENTION_RE = re.compile(r"@([A-Za-z0-9_][A-Za-z0-9_-]*)")
+
+
+class StoreError(RuntimeError):
+    pass
+
+
+class NotAuthorised(StoreError):
+    """Raised when a non-human tries to exercise a human-only power."""
+
+
+@dataclass(frozen=True)
+class Event:
+    id: int
+    topic_id: int | None
+    kind: str
+    actor: str
+    payload: dict[str, Any]
+    created_at: str
+
+
+def default_db_path() -> Path:
+    """Board location. Env override first, then the repo-local .agora/ dir."""
+    env = os.environ.get("AGORA_DB")
+    if env:
+        return Path(env)
+    return Path.cwd() / ".agora" / "board.db"
+
+
+class Store:
+    def __init__(self, path: Path | str | None = None) -> None:
+        self.path = Path(path) if path else default_db_path()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(
+            self.path,
+            timeout=30.0,
+            isolation_level=None,  # explicit transactions; see tx()
+        )
+        self._conn.row_factory = sqlite3.Row
+        self._conn.text_factory = str  # sqlite3 decodes as UTF-8; be explicit about it
+        # N writers on one file. WAL lets readers proceed during a write, and
+        # busy_timeout turns the remaining lock contention into a wait instead of
+        # an immediate "database is locked" that would surface as a fake agent error.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=30000")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+
+    # ------------------------------------------------------------------ plumbing
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def __enter__(self) -> "Store":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    @contextmanager
+    def tx(self) -> Iterator[sqlite3.Connection]:
+        """IMMEDIATE so a write-intent transaction takes the write lock up front,
+        rather than upgrading mid-transaction and hitting SQLITE_BUSY on a peer."""
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield self._conn
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        self._conn.execute("COMMIT")
+
+    def q(self, sql: str, args: Sequence[Any] = ()) -> list[sqlite3.Row]:
+        return list(self._conn.execute(sql, args))
+
+    def q1(self, sql: str, args: Sequence[Any] = ()) -> sqlite3.Row | None:
+        cur = self._conn.execute(sql, args)
+        return cur.fetchone()
+
+    def init_schema(self) -> None:
+        self._conn.executescript(SCHEMA.read_text(encoding="utf-8"))
+
+    # ------------------------------------------------------------------- events
+
+    def _emit(
+        self,
+        conn: sqlite3.Connection,
+        topic_id: int | None,
+        kind: str,
+        actor: str,
+        payload: dict[str, Any] | None = None,
+    ) -> int:
+        cur = conn.execute(
+            "INSERT INTO events (topic_id, kind, actor, payload) VALUES (?,?,?,?)",
+            (topic_id, kind, actor, json.dumps(payload or {}, ensure_ascii=False)),
+        )
+        return int(cur.lastrowid)
+
+    def events_since(self, cursor: int, topic_id: int | None = None, limit: int = 200) -> list[Event]:
+        if topic_id is None:
+            rows = self.q("SELECT * FROM events WHERE id > ? ORDER BY id LIMIT ?", (cursor, limit))
+        else:
+            rows = self.q(
+                "SELECT * FROM events WHERE id > ? AND topic_id = ? ORDER BY id LIMIT ?",
+                (cursor, topic_id, limit),
+            )
+        return [
+            Event(r["id"], r["topic_id"], r["kind"], r["actor"], json.loads(r["payload"]), r["created_at"])
+            for r in rows
+        ]
+
+    def head(self) -> int:
+        row = self.q1("SELECT COALESCE(MAX(id), 0) AS h FROM events")
+        return int(row["h"]) if row else 0
+
+    # ------------------------------------------------------------------- agents
+
+    def add_agent(
+        self,
+        name: str,
+        kind: str,
+        *,
+        display: str | None = None,
+        driver: str | None = None,
+        driver_cfg: dict[str, Any] | None = None,
+    ) -> None:
+        driver = driver or ("none" if kind in HUMAN_KINDS or kind == "external" else "spawn")
+        if driver not in DRIVER_KINDS:
+            raise StoreError(f"unknown driver {driver!r}; expected one of {sorted(DRIVER_KINDS)}")
+        with self.tx() as c:
+            c.execute(
+                """INSERT INTO agents (name, kind, display, driver, driver_cfg)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(name) DO UPDATE SET
+                     kind=excluded.kind, display=excluded.display,
+                     driver=excluded.driver, driver_cfg=excluded.driver_cfg""",
+                (name, kind, display or name, driver, json.dumps(driver_cfg or {}, ensure_ascii=False)),
+            )
+            self._emit(c, None, "seat", name, {"action": "registered", "kind": kind, "driver": driver})
+
+    def agent(self, name: str) -> sqlite3.Row:
+        row = self.q1("SELECT * FROM agents WHERE name = ?", (name,))
+        if row is None:
+            raise StoreError(f"no such agent: {name!r}")
+        return row
+
+    def agents(self) -> list[sqlite3.Row]:
+        return self.q("SELECT * FROM agents ORDER BY name")
+
+    def is_human(self, name: str) -> bool:
+        row = self.q1("SELECT kind FROM agents WHERE name = ?", (name,))
+        return bool(row) and row["kind"] in HUMAN_KINDS
+
+    # ------------------------------------------------------------------- topics
+
+    def open_topic(
+        self,
+        slug: str,
+        title: str,
+        brief: str,
+        opened_by: str,
+        *,
+        seats: Iterable[str] = (),
+        max_rounds: int = 3,
+        max_turns: int = 6,
+    ) -> int:
+        with self.tx() as c:
+            cur = c.execute(
+                """INSERT INTO topics (slug, title, brief, opened_by, max_rounds)
+                   VALUES (?,?,?,?,?)""",
+                (slug, title, brief, opened_by, max_rounds),
+            )
+            topic_id = int(cur.lastrowid)
+            for agent in seats:
+                c.execute(
+                    "INSERT INTO seats (topic_id, agent, max_turns) VALUES (?,?,?)",
+                    (topic_id, agent, max_turns),
+                )
+            c.execute(
+                "INSERT INTO messages (topic_id, author, kind, body) VALUES (?,?,'system',?)",
+                (topic_id, opened_by, brief),
+            )
+            self._emit(c, topic_id, "topic", opened_by,
+                       {"action": "opened", "slug": slug, "seats": list(seats)})
+        return topic_id
+
+    def topic(self, ref: int | str) -> sqlite3.Row:
+        col = "id" if isinstance(ref, int) else "slug"
+        row = self.q1(f"SELECT * FROM topics WHERE {col} = ?", (ref,))
+        if row is None:
+            raise StoreError(f"no such topic: {ref!r}")
+        return row
+
+    def topics(self, status: str | None = None) -> list[sqlite3.Row]:
+        if status:
+            return self.q("SELECT * FROM topics WHERE status = ? ORDER BY id DESC", (status,))
+        return self.q("SELECT * FROM topics ORDER BY id DESC")
+
+    def set_topic_status(self, topic_id: int, status: str, actor: str, note: str = "") -> None:
+        with self.tx() as c:
+            closed = "datetime('now')" if status in {"resolved", "aborted"} else "NULL"
+            c.execute(f"UPDATE topics SET status = ?, closed_at = {closed} WHERE id = ?", (status, topic_id))
+            self._emit(c, topic_id, "topic", actor, {"action": status, "note": note})
+
+    # -------------------------------------------------------------------- seats
+
+    def seat(self, topic_id: int, agent: str) -> sqlite3.Row | None:
+        return self.q1("SELECT * FROM seats WHERE topic_id = ? AND agent = ?", (topic_id, agent))
+
+    def seats(self, topic_id: int) -> list[sqlite3.Row]:
+        return self.q(
+            """SELECT s.*, a.kind, a.driver, a.driver_cfg, a.enabled
+               FROM seats s JOIN agents a ON a.name = s.agent
+               WHERE s.topic_id = ? ORDER BY s.agent""",
+            (topic_id,),
+        )
+
+    def set_seat_state(self, topic_id: int, agent: str, state: str) -> None:
+        with self.tx() as c:
+            c.execute("UPDATE seats SET state = ? WHERE topic_id = ? AND agent = ?",
+                      (state, topic_id, agent))
+
+    def set_cli_session(self, topic_id: int, agent: str, cli_session: str) -> None:
+        """Persist the CLI's own session identifier so resume is deterministic.
+
+        Claude and Gemini accept a UUID we choose; Codex and Copilot hand one back.
+        Either way it lands here, and the supervisor never falls back to
+        --last/--continue, which would race across topics sharing one CLI."""
+        with self.tx() as c:
+            c.execute("UPDATE seats SET cli_session = ? WHERE topic_id = ? AND agent = ?",
+                      (cli_session, topic_id, agent))
+
+    def advance_cursor(self, topic_id: int, agent: str, cursor: int) -> None:
+        with self.tx() as c:
+            c.execute(
+                "UPDATE seats SET last_seen = MAX(last_seen, ?) WHERE topic_id = ? AND agent = ?",
+                (cursor, topic_id, agent),
+            )
+
+    def new_session_id(self) -> str:
+        return str(uuid.uuid4())
+
+    # ----------------------------------------------------------------- messages
+
+    def post(
+        self,
+        topic_id: int,
+        author: str,
+        body: str,
+        *,
+        kind: str = "say",
+        reply_to: int | None = None,
+        proposal_id: int | None = None,
+        count_turn: bool = True,
+        mention_targets: Iterable[str] | None = None,
+    ) -> int:
+        """Append to the record. Returns the message id.
+
+        `count_turn` is False for system notes and for human interjections -- a
+        human joining the discussion must never consume an agent's metered turns.
+        """
+        topic = self.topic(topic_id)
+        if topic["status"] not in {"open", "paused"}:
+            raise StoreError(f"topic {topic['slug']} is {topic['status']}; not accepting posts")
+        with self.tx() as c:
+            cur = c.execute(
+                """INSERT INTO messages (topic_id, author, kind, body, reply_to, proposal_id)
+                   VALUES (?,?,?,?,?,?)""",
+                (topic_id, author, kind, body, reply_to, proposal_id),
+            )
+            msg_id = int(cur.lastrowid)
+            if count_turn:
+                c.execute(
+                    "UPDATE seats SET turns_used = turns_used + 1 WHERE topic_id = ? AND agent = ?",
+                    (topic_id, author),
+                )
+            # Posting discharges every question outstanding against you. Answering
+            # in the body of a normal reply is how people actually respond, so
+            # requiring a special "answer" call would leave stale asks forever.
+            c.execute(
+                """UPDATE mentions SET answered_by = ?
+                   WHERE topic_id = ? AND target = ? AND answered_by IS NULL""",
+                (msg_id, topic_id, author),
+            )
+            mentioned = self._record_mentions(c, topic_id, msg_id, author, body, mention_targets, body)
+
+            ev = self._emit(c, topic_id, "message", author,
+                            {"message_id": msg_id, "kind": kind, "preview": body[:280],
+                             "mentions": mentioned})
+            # The author has by definition seen everything up to its own message.
+            c.execute("UPDATE seats SET last_seen = MAX(last_seen, ?) WHERE topic_id = ? AND agent = ?",
+                      (ev, topic_id, author))
+        return msg_id
+
+    # ----------------------------------------------------------------- mentions
+
+    def _record_mentions(
+        self,
+        conn: sqlite3.Connection,
+        topic_id: int,
+        message_id: int,
+        asker: str,
+        body: str,
+        explicit: Iterable[str] | None,
+        question: str,
+    ) -> list[str]:
+        """Turn `@name` into a directed ask.
+
+        Only seats on this topic count. An `@` naming someone who is not seated is
+        left as plain text rather than silently pulling a stranger into the debate
+        -- adding a seat costs money on someone's subscription, so it stays a
+        human's decision.
+        """
+        seated = {s["agent"] for s in self.q(
+            "SELECT agent FROM seats WHERE topic_id = ?", (topic_id,))}
+        targets = {t for t in (explicit or []) if t in seated}
+        targets |= {m for m in MENTION_RE.findall(body) if m in seated}
+        targets.discard(asker)                      # @-ing yourself is a no-op
+        for target in sorted(targets):
+            conn.execute(
+                """INSERT INTO mentions (topic_id, message_id, asker, target, question)
+                   VALUES (?,?,?,?,?)""",
+                (topic_id, message_id, asker, target, question[:2000]),
+            )
+        return sorted(targets)
+
+    def open_mentions(self, topic_id: int, target: str | None = None) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM mentions WHERE topic_id = ? AND answered_by IS NULL"
+        args: list[Any] = [topic_id]
+        if target:
+            sql += " AND target = ?"
+            args.append(target)
+        return self.q(sql + " ORDER BY id", args)
+
+    def ask(self, topic_id: int, asker: str, target: str, question: str) -> int:
+        """Explicit @: post the question and direct it at one seat."""
+        if not self.seat(topic_id, target):
+            raise StoreError(f"{target!r} holds no seat on this topic")
+        return self.post(
+            topic_id, asker, f"@{target} {question}",
+            count_turn=not self.is_human(asker),
+            mention_targets=[target],
+        )
+
+    def transcript(self, topic_id: int, after: int = 0, limit: int = 500) -> list[sqlite3.Row]:
+        return self.q(
+            "SELECT * FROM messages WHERE topic_id = ? AND id > ? ORDER BY id LIMIT ?",
+            (topic_id, after, limit),
+        )
+
+    # ---------------------------------------------------------------- proposals
+
+    def propose(self, topic_id: int, author: str, title: str, body: str) -> int:
+        with self.tx() as c:
+            cur = c.execute(
+                "INSERT INTO messages (topic_id, author, kind, body) VALUES (?,?,'propose',?)",
+                (topic_id, author, f"{title}\n\n{body}"),
+            )
+            msg_id = int(cur.lastrowid)
+            cur = c.execute(
+                """INSERT INTO proposals (topic_id, message_id, author, title, body)
+                   VALUES (?,?,?,?,?)""",
+                (topic_id, msg_id, author, title, body),
+            )
+            pid = int(cur.lastrowid)
+            c.execute("UPDATE messages SET proposal_id = ? WHERE id = ?", (pid, msg_id))
+            c.execute("UPDATE seats SET turns_used = turns_used + 1 WHERE topic_id = ? AND agent = ?",
+                      (topic_id, author))
+            self._emit(c, topic_id, "proposal", author,
+                       {"proposal_id": pid, "title": title, "action": "opened"})
+        return pid
+
+    def proposal(self, pid: int) -> sqlite3.Row:
+        row = self.q1("SELECT * FROM proposals WHERE id = ?", (pid,))
+        if row is None:
+            raise StoreError(f"no such proposal: {pid}")
+        return row
+
+    def proposals(self, topic_id: int | None = None, status: str | None = None) -> list[sqlite3.Row]:
+        sql, args = "SELECT * FROM proposals WHERE 1=1", []
+        if topic_id is not None:
+            sql += " AND topic_id = ?"; args.append(topic_id)
+        if status is not None:
+            sql += " AND status = ?"; args.append(status)
+        return self.q(sql + " ORDER BY id DESC", args)
+
+    def vote(self, pid: int, agent: str, stance: str, rationale: str = "") -> None:
+        if stance not in {"support", "object", "abstain"}:
+            raise StoreError(f"bad stance {stance!r}")
+        p = self.proposal(pid)
+        if p["status"] != "open":
+            raise StoreError(f"proposal {pid} is {p['status']}; voting closed")
+        with self.tx() as c:
+            c.execute(
+                """INSERT INTO votes (proposal_id, agent, stance, rationale) VALUES (?,?,?,?)
+                   ON CONFLICT(proposal_id, agent) DO UPDATE SET
+                     stance=excluded.stance, rationale=excluded.rationale""",
+                (pid, agent, stance, rationale),
+            )
+            c.execute(
+                "INSERT INTO messages (topic_id, author, kind, body, proposal_id) VALUES (?,?,?,?,?)",
+                (p["topic_id"], agent, "object" if stance == "object" else "support", rationale, pid),
+            )
+            self._emit(c, p["topic_id"], "proposal", agent,
+                       {"proposal_id": pid, "action": "vote", "stance": stance})
+
+    def votes(self, pid: int) -> list[sqlite3.Row]:
+        return self.q("SELECT * FROM votes WHERE proposal_id = ? ORDER BY agent", (pid,))
+
+    def decide(self, pid: int, decider: str, approve: bool, rationale: str = "") -> None:
+        """Close a proposal. Humans only -- this is the whole point of the platform.
+
+        Agents deliberate and vote; votes are advisory. The transition that lets a
+        proposal become action is reserved to a human seat, and it is checked here
+        rather than asked for in a prompt, because instructions are advice and this
+        is the one place that needs a fence.
+        """
+        if not self.is_human(decider):
+            raise NotAuthorised(
+                f"{decider!r} is not a human seat; only a human closes a proposal. "
+                "Agents may vote (support/object) -- votes are advisory."
+            )
+        p = self.proposal(pid)
+        if p["status"] != "open":
+            raise StoreError(f"proposal {pid} already {p['status']}")
+        status = "approved" if approve else "rejected"
+        with self.tx() as c:
+            c.execute(
+                """UPDATE proposals SET status = ?, decided_by = ?, rationale = ?,
+                   decided_at = datetime('now') WHERE id = ?""",
+                (status, decider, rationale, pid),
+            )
+            c.execute(
+                "INSERT INTO messages (topic_id, author, kind, body, proposal_id) VALUES (?,?,'ruling',?,?)",
+                (p["topic_id"], decider, f"[{status}] {rationale}".strip(), pid),
+            )
+            self._emit(c, p["topic_id"], "decision", decider,
+                       {"proposal_id": pid, "status": status, "rationale": rationale})
+
+    # -------------------------------------------------------------------- wakes
+
+    def record_wake(self, topic_id: int, agent: str) -> int:
+        with self.tx() as c:
+            cur = c.execute(
+                "INSERT INTO wakes (topic_id, agent, outcome) VALUES (?,?,'pending')",
+                (topic_id, agent),
+            )
+            return int(cur.lastrowid)
+
+    def finish_wake(self, wake_id: int, outcome: str, detail: str = "") -> None:
+        with self.tx() as c:
+            c.execute(
+                "UPDATE wakes SET outcome = ?, detail = ?, ended_at = datetime('now') WHERE id = ?",
+                (outcome, detail[:2000], wake_id),
+            )
+
+    def wakes_in_last_hour(self, agent: str) -> int:
+        """Metered CLIs charge for a failed wake too, so this counts attempts,
+        not successes."""
+        row = self.q1(
+            "SELECT COUNT(*) AS n FROM wakes WHERE agent = ? AND started_at > datetime('now','-1 hour')",
+            (agent,),
+        )
+        return int(row["n"]) if row else 0
+
+
+def connect(path: Path | str | None = None, *, init: bool = False) -> Store:
+    store = Store(path)
+    if init or not store.q1("SELECT name FROM sqlite_master WHERE type='table' AND name='topics'"):
+        store.init_schema()
+    return store
+
+
+def _proposal_event_id(store: Store, pid: int) -> int:
+    """Event id at which a proposal became visible to the council.
+
+    Seats track an event cursor, so "has this seat had a chance to respond to
+    proposal N" is a cursor comparison -- which works whether or not the agent
+    cooperated by calling the vote tool.
+    """
+    row = store.q1(
+        """SELECT id FROM events
+           WHERE kind = 'proposal' AND json_extract(payload, '$.proposal_id') = ?
+             AND json_extract(payload, '$.action') = 'opened'
+           ORDER BY id LIMIT 1""",
+        (pid,),
+    )
+    return int(row["id"]) if row else 0
+
+
+Store.proposal_event_id = lambda self, pid: _proposal_event_id(self, pid)
