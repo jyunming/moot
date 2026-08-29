@@ -36,7 +36,7 @@ DRIVER_KINDS = frozenset({"stdio_json", "acp", "spawn", "none"})
 #: How a topic is framed to its seats. `debate` asks them to find the flaw;
 #: `discuss` asks them to build. The difference is entirely in the prompt, and
 #: it matters: a seat told disagreement is the product will invent some.
-TOPIC_MODES = frozenset({"debate", "discuss"})
+TOPIC_MODES = frozenset({"debate", "discuss", "work"})
 
 #: What a seat may do. `deliberate` seats argue and propose; they must not be able
 #: to change anything. `execute` is an explicit escalation the user grants at
@@ -54,7 +54,7 @@ class StoreError(RuntimeError):
 
 
 class NotAuthorised(StoreError):
-    """Raised when a non-human tries to exercise a human-only power."""
+    """Raised when a seat tries to exercise a power it does not hold."""
 
 
 @dataclass(frozen=True)
@@ -234,6 +234,7 @@ class Store:
         max_turns: int = 6,
         mode: str = "debate",
         effort: str | None = None,
+        manager: str | None = None,
     ) -> int:
         if mode not in TOPIC_MODES:
             raise StoreError(f"unknown mode {mode!r}; expected one of {sorted(TOPIC_MODES)}")
@@ -246,8 +247,9 @@ class Store:
             topic_id = int(cur.lastrowid)
             for agent in seats:
                 c.execute(
-                    "INSERT INTO seats (topic_id, agent, max_turns) VALUES (?,?,?)",
-                    (topic_id, agent, max_turns),
+                    "INSERT INTO seats (topic_id, agent, role, max_turns) VALUES (?,?,?,?)",
+                    (topic_id, agent, "manager" if agent == manager else "participant",
+                     max_turns),
                 )
             c.execute(
                 "INSERT INTO messages (topic_id, author, kind, body) VALUES (?,?,'system',?)",
@@ -517,6 +519,120 @@ class Store:
             )
             self._emit(c, p["topic_id"], "decision", decider,
                        {"proposal_id": pid, "status": status, "rationale": rationale})
+        if approve:
+            # The single point where drafted work becomes runnable. Nothing else
+            # in the codebase moves a task out of 'draft', which is what makes
+            # "no execution before a human approves the plan" checkable.
+            released = self.release_plan(pid)
+            if released:
+                self.post(int(p["topic_id"]), "agora",
+                          f"plan approved - {released} task(s) assigned",
+                          kind="system", count_turn=False)
+
+    # -------------------------------------------------------------------- tasks
+
+    def is_manager(self, topic_id: int, agent: str) -> bool:
+        row = self.seat(topic_id, agent)
+        return bool(row) and row["role"] == "manager"
+
+    def draft_task(self, topic_id: int, manager: str, assignee: str, title: str,
+                   body: str = "", acceptance: str = "") -> int:
+        """A manager writes a task. It is a *draft*: nothing runs until a human
+        approves the plan. Assign-rights are checked here rather than asked for in
+        a prompt, for the same reason `decide` checks humanity -- an instruction is
+        advice, and this is a place that needs a fence."""
+        if self.topic(topic_id)["mode"] != "work":
+            raise StoreError("tasks only exist on a work topic")
+        if not self.is_manager(topic_id, manager):
+            raise NotAuthorised(f"{manager!r} is not the manager of this topic")
+        if not self.seat(topic_id, assignee):
+            raise StoreError(f"{assignee!r} holds no seat on this topic")
+        with self.tx() as c:
+            cur = c.execute(
+                """INSERT INTO tasks (topic_id, title, body, acceptance, assignee, created_by)
+                   VALUES (?,?,?,?,?,?)""",
+                (topic_id, title, body, acceptance, assignee, manager),
+            )
+            tid = int(cur.lastrowid)
+            self._emit(c, topic_id, "task", manager,
+                       {"task_id": tid, "action": "drafted", "assignee": assignee})
+        return tid
+
+    def tasks(self, topic_id: int, status: str | None = None,
+              assignee: str | None = None) -> list[sqlite3.Row]:
+        sql, args = "SELECT * FROM tasks WHERE topic_id = ?", [topic_id]
+        if status:
+            sql += " AND status = ?"
+            args.append(status)
+        if assignee:
+            sql += " AND assignee = ?"
+            args.append(assignee)
+        return self.q(sql + " ORDER BY id", args)
+
+    def task(self, task_id: int) -> sqlite3.Row:
+        row = self.q1("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        if row is None:
+            raise StoreError(f"no such task: {task_id}")
+        return row
+
+    def submit_plan(self, topic_id: int, manager: str) -> int:
+        """Put every draft task to the human as one proposal.
+
+        One proposal for the whole plan, not one per task: the human is approving
+        *who does what*, and approving piecemeal would let work start on half a
+        plan while the other half is still being argued about.
+        """
+        drafts = self.tasks(topic_id, status="draft")
+        if not drafts:
+            raise StoreError("no draft tasks to put to a human")
+        lines = []
+        for t in drafts:
+            lines.append(f"- **{t['assignee']}** - {t['title']}")
+            if t["acceptance"]:
+                lines.append(f"  done when: {t['acceptance']}")
+        pid = self.propose(topic_id, manager, f"Work plan: {len(drafts)} task(s)",
+                           "\n".join(lines))
+        with self.tx() as c:
+            c.execute("UPDATE tasks SET proposal_id = ? WHERE topic_id = ? AND status = 'draft'",
+                      (pid, topic_id))
+        return pid
+
+    def release_plan(self, proposal_id: int) -> int:
+        """Turn approved drafts into assigned work. Reached only from `decide`."""
+        with self.tx() as c:
+            cur = c.execute(
+                "UPDATE tasks SET status = 'assigned', updated_at = datetime('now') "
+                "WHERE proposal_id = ? AND status = 'draft'", (proposal_id,))
+            return cur.rowcount
+
+    def update_task(self, task_id: int, agent: str, status: str, result: str = "") -> None:
+        """A worker reports on its own task; a manager rules on a finished one."""
+        t = self.task(task_id)
+        worker_states = {"in_progress", "done", "blocked"}
+        manager_states = {"accepted", "rejected"}
+        if status not in worker_states | manager_states:
+            raise StoreError(f"bad task status {status!r}")
+        if status in worker_states and agent != t["assignee"]:
+            raise NotAuthorised(f"{agent!r} is not the assignee of task {task_id}")
+        if status in manager_states and not self.is_manager(int(t["topic_id"]), agent):
+            raise NotAuthorised(f"only the manager accepts or rejects task {task_id}")
+        if t["status"] == "draft":
+            raise StoreError(f"task {task_id} is still a draft; the plan needs approving")
+        note = f"task #{task_id} [{t['title']}] -> {status}"
+        if result:
+            note += "\n" + result
+        with self.tx() as c:
+            c.execute("UPDATE tasks SET status = ?, result = COALESCE(NULLIF(?,''), result), "
+                      "updated_at = datetime('now') WHERE id = ?", (status, result, task_id))
+            c.execute("INSERT INTO messages (topic_id, author, kind, body) VALUES (?,?,'system',?)",
+                      (t["topic_id"], agent, note))
+            self._emit(c, int(t["topic_id"]), "task", agent,
+                       {"task_id": task_id, "action": status})
+
+    def set_task_workspace(self, task_id: int, branch: str, worktree: str) -> None:
+        with self.tx() as c:
+            c.execute("UPDATE tasks SET branch = ?, worktree = ? WHERE id = ?",
+                      (branch, worktree, task_id))
 
     # -------------------------------------------------------------------- wakes
 

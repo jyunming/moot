@@ -146,3 +146,32 @@ CREATE TABLE IF NOT EXISTS mentions (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_mentions_open ON mentions(topic_id, target, answered_by);
+
+-- --------------------------------------------------------------------- tasks
+
+-- Team mode. A manager seat drafts tasks; the draft set is put to a human as an
+-- ordinary proposal, and nothing executes until that proposal is approved. This
+-- reuses the one fence already hardened (only humans close a proposal) instead of
+-- inventing a second approval path that would have to be trusted separately.
+CREATE TABLE IF NOT EXISTS tasks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id    INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    title       TEXT NOT NULL,
+    body        TEXT NOT NULL DEFAULT '',
+    acceptance  TEXT NOT NULL DEFAULT '',   -- how the manager will know it is done
+    assignee    TEXT NOT NULL REFERENCES agents(name),
+    created_by  TEXT NOT NULL,              -- the manager seat
+    -- draft    : written, not yet put to a human
+    -- assigned : plan approved; the worker may be woken for it
+    -- done     : worker reports finished; awaiting the manager's review
+    -- blocked  : worker cannot proceed and said why
+    -- accepted / rejected : the manager's verdict
+    status      TEXT NOT NULL DEFAULT 'draft',
+    proposal_id INTEGER REFERENCES proposals(id),   -- the plan gate
+    branch      TEXT,                       -- work lands here, never on main
+    worktree    TEXT,                       -- isolated checkout for this task
+    result      TEXT NOT NULL DEFAULT '',   -- what the worker reported back
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_topic ON tasks(topic_id, status);

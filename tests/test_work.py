@@ -1,0 +1,201 @@
+"""Team mode: a manager plans, a human approves, workers execute.
+
+The load-bearing claim is a negative one -- *no file is touched before a human
+approves the plan* -- so these tests assert on computed board state after the loop
+actually runs, and on the `executing` flag the driver really received. A test that
+checked the guard clause exists would pass while the guard was bypassed elsewhere.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from agora.drivers import FakeDriver
+from agora.store import NotAuthorised, StoreError, connect
+from agora.supervisor import Caps, Supervisor
+
+
+@pytest.fixture()
+def team(tmp_path):
+    s = connect(tmp_path / "board.db", init=True)
+    s.add_agent("human", "human", display="the arbiter")
+    s.add_agent("boss", "claude", driver="spawn", driver_cfg={"cwd": str(tmp_path)})
+    s.add_agent("hand", "codex", driver="spawn",
+                driver_cfg={"cwd": str(tmp_path), "capability": "execute"})
+    s.add_agent("thinker", "gemini", driver="spawn", driver_cfg={"cwd": str(tmp_path)})
+    yield s
+    s.close()
+
+
+def work_topic(team, **kw):
+    return team.open_topic(
+        "ship-it", "Add retry backoff to the gateway",
+        "Fixed 30s retries stampede on recovery. Ship exponential backoff.",
+        "human", seats=("boss", "hand", "thinker", "human"),
+        mode="work", manager="boss", **kw,
+    )
+
+
+def run(sup, tid):
+    return asyncio.run(sup.run_topic(tid))
+
+
+# ------------------------------------------------------------ who may assign
+
+def test_only_the_manager_assigns(team):
+    topic = work_topic(team)
+    assert team.is_manager(topic, "boss")
+
+    with pytest.raises(NotAuthorised):
+        team.draft_task(topic, "hand", "thinker", "do my work for me")
+
+    tid = team.draft_task(topic, "boss", "hand", "Add backoff", acceptance="tests pass")
+    assert team.task(tid)["status"] == "draft"
+
+
+def test_tasks_only_exist_on_a_work_topic(team):
+    chat = team.open_topic("chat", "T", "B", "human", seats=("boss", "hand"), mode="discuss")
+    with pytest.raises(StoreError):
+        team.draft_task(chat, "boss", "hand", "sneak some work in")
+
+
+# --------------------------------------------------- nothing runs before approval
+
+def test_no_worker_is_woken_until_a_human_approves_the_plan(team):
+    """The whole safety claim. The loop has no path to an `assigned` task except
+    through Store.decide, so it cannot route around the gate."""
+    topic = work_topic(team)
+    woken: list[str] = []
+    driver = FakeDriver(team, script=lambda st, seat, p: (woken.append(seat.agent) or None))
+
+    team.draft_task(topic, "boss", "hand", "Add backoff", acceptance="tests pass")
+    reason = run(Supervisor(team, {"boss": driver, "hand": driver}, Caps()), topic)
+
+    assert "awaits your approval" in reason
+    assert "hand" not in woken, "a worker ran before the plan was approved"
+    assert team.tasks(topic, status="assigned") == []
+    assert team.tasks(topic, status="draft") or team.tasks(topic)[0]["proposal_id"]
+
+
+def test_approving_the_plan_is_the_only_thing_that_releases_work(team):
+    topic = work_topic(team)
+    team.draft_task(topic, "boss", "hand", "Add backoff", acceptance="tests pass")
+    pid = team.submit_plan(topic, "boss")
+
+    assert team.tasks(topic, status="assigned") == []
+    with pytest.raises(NotAuthorised):
+        team.decide(pid, "boss", approve=True)      # the manager cannot self-approve
+    assert team.tasks(topic, status="assigned") == []
+
+    team.decide(pid, "human", approve=True, rationale="go")
+    assert [t["title"] for t in team.tasks(topic, status="assigned")] == ["Add backoff"]
+
+
+def test_a_rejected_plan_releases_nothing(team):
+    topic = work_topic(team)
+    team.draft_task(topic, "boss", "hand", "Add backoff")
+    pid = team.submit_plan(topic, "boss")
+    team.decide(pid, "human", approve=False, rationale="wrong shape")
+
+    assert team.tasks(topic, status="assigned") == []
+    assert team.tasks(topic, status="draft"), "drafts should survive a rejection"
+
+
+# ------------------------------------------------------------- the two-key rule
+
+def test_execute_capability_alone_does_not_grant_execution(team):
+    """`hand` is registered execute-capable, but on a *meeting* topic it must be
+    woken read-only. Neither key works on its own."""
+    chat = team.open_topic("chat", "T", "B", "human", seats=("hand",), mode="discuss")
+    got: list[bool] = []
+    driver = FakeDriver(team, script=lambda st, seat, p: (got.append(seat.executing) or "ok"))
+
+    asyncio.run(Supervisor(team, {"hand": driver}).wake_seat(chat, "hand"))
+    assert got == [False], "a meeting wake must never be an executing wake"
+
+
+def test_an_approved_task_wakes_its_worker_in_execute_mode(team):
+    topic = work_topic(team)
+    team.draft_task(topic, "boss", "hand", "Add backoff", acceptance="tests pass")
+    team.decide(team.submit_plan(topic, "boss"), "human", approve=True)
+
+    seen: list[tuple[str, bool]] = []
+
+    def worker(st, seat, prompt):
+        seen.append((seat.agent, seat.executing))
+        st.update_task(team.tasks(seat.topic_id, assignee=seat.agent)[0]["id"],
+                       seat.agent, "done", "added backoff with jitter")
+        return None
+
+    driver = FakeDriver(team, script=worker)
+    run(Supervisor(team, {"boss": driver, "hand": driver}, Caps(max_turns_per_seat=1)), topic)
+
+    assert ("hand", True) in seen, f"worker not woken to execute: {seen}"
+    assert team.tasks(topic)[0]["result"].startswith("added backoff")
+
+
+def test_a_task_assigned_to_a_deliberation_seat_is_blocked_not_run(team):
+    """A task nobody can do is a planning error the human should see, not a stall."""
+    topic = work_topic(team)
+    team.draft_task(topic, "boss", "thinker", "Edit the gateway")   # thinker: no execute
+    team.decide(team.submit_plan(topic, "boss"), "human", approve=True)
+
+    ran: list[str] = []
+    driver = FakeDriver(team, script=lambda st, seat, p: (ran.append(seat.agent) or None))
+    run(Supervisor(team, {"boss": driver, "thinker": driver}, Caps(max_turns_per_seat=1)), topic)
+
+    assert "thinker" not in ran, "a deliberation-only seat was woken to execute"
+    task = team.tasks(topic)[0]
+    assert task["status"] == "blocked" and "execute capability" in task["result"]
+
+
+# ------------------------------------------------------------- task lifecycle
+
+def test_a_worker_may_only_report_on_its_own_task(team):
+    topic = work_topic(team)
+    tid = team.draft_task(topic, "boss", "hand", "Add backoff")
+    team.decide(team.submit_plan(topic, "boss"), "human", approve=True)
+
+    with pytest.raises(NotAuthorised):
+        team.update_task(tid, "thinker", "done", "not mine to finish")
+    team.update_task(tid, "hand", "done", "done properly")
+    assert team.task(tid)["status"] == "done"
+
+
+def test_only_the_manager_accepts_finished_work(team):
+    topic = work_topic(team)
+    tid = team.draft_task(topic, "boss", "hand", "Add backoff")
+    team.decide(team.submit_plan(topic, "boss"), "human", approve=True)
+    team.update_task(tid, "hand", "done", "shipped")
+
+    with pytest.raises(NotAuthorised):
+        team.update_task(tid, "hand", "accepted", "I approve of myself")
+    team.update_task(tid, "boss", "accepted", "looks right")
+    assert team.task(tid)["status"] == "accepted"
+
+
+def test_a_draft_cannot_be_worked_on(team):
+    topic = work_topic(team)
+    tid = team.draft_task(topic, "boss", "hand", "Add backoff")
+    with pytest.raises(StoreError):
+        team.update_task(tid, "hand", "in_progress")
+
+
+def test_the_worker_prompt_is_the_task_not_the_debate(team):
+    """A worker needs its task, where to do it and how to report. The council
+    transcript would just spend its context."""
+    topic = work_topic(team)
+    tid = team.draft_task(topic, "boss", "hand", "Add backoff",
+                          body="Exponential, capped at 6 attempts.",
+                          acceptance="gateway tests pass")
+    team.decide(team.submit_plan(topic, "boss"), "human", approve=True)
+    team.post(topic, "thinker", "IRRELEVANT-DEBATE-CHATTER", count_turn=False)
+
+    prompt = Supervisor(team, {}).build_task_prompt(topic, team.task(tid))
+
+    assert "Add backoff" in prompt and "capped at 6 attempts" in prompt
+    assert "gateway tests pass" in prompt
+    assert "agora_task_update" in prompt
+    assert "IRRELEVANT-DEBATE-CHATTER" not in prompt

@@ -207,6 +207,69 @@ def agora_pass(topic: str, why: str = "nothing to add") -> str:
     return f"{AGENT} passed on `{topic}`."
 
 
+
+
+# ----------------------------------------------------------------------- work
+
+@mcp.tool()
+def agora_assign(topic: str, agent: str, title: str, body: str = "",
+                 acceptance: str = "") -> str:
+    """Draft a task for one teammate. Manager only, on a work topic.
+
+    The task is a *draft*: it does not run, and nobody is woken for it, until a
+    human approves the plan. Write `acceptance` as something checkable -- the
+    worker is told it, and you will be judging against it.
+
+    Assign to the seat actually suited to the work, and only to seats registered
+    with execute capability; a task assigned to a deliberation-only seat comes
+    back blocked rather than silently doing nothing.
+    """
+    tid = _topic_id(topic)
+    try:
+        task_id = board().draft_task(tid, AGENT, agent, title, body, acceptance)
+    except StoreError as exc:
+        return f"refused: {exc}"
+    return (f"task #{task_id} drafted for {agent}. It stays a draft until a human "
+            f"approves the plan — draft the rest, then stop.")
+
+
+@mcp.tool()
+def agora_tasks(topic: str) -> str:
+    """The plan and where every task has got to."""
+    tid = _topic_id(topic)
+    rows = board().tasks(tid)
+    if not rows:
+        return "No tasks planned yet."
+    out = []
+    for t in rows:
+        line = f"#{t['id']} [{t['status']}] {t['title']} — {t['assignee']}"
+        if t["branch"]:
+            line += f"  ({t['branch']})"
+        out.append(line)
+        if t["acceptance"]:
+            out.append(f"    done when: {t['acceptance']}")
+        if t["result"]:
+            out.append(f"    reported: {t['result'][:400]}")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def agora_task_update(task_id: int, status: str, result: str = "") -> str:
+    """Report on your task, or rule on someone else's if you are the manager.
+
+    As the worker: `in_progress`, `done`, or `blocked`. Say concretely what you
+    changed and where, or precisely what stopped you -- your report is all the
+    manager and the human will see.
+
+    As the manager: `accepted` or `rejected`, with the reason.
+    """
+    try:
+        board().update_task(task_id, AGENT, status, result)
+    except StoreError as exc:
+        return f"refused: {exc}"
+    return f"task #{task_id} → {status}."
+
+
 def main(argv: list[str] | None = None) -> int:
     global AGENT, BOARD
     ap = argparse.ArgumentParser(description="Agora MCP server (stdio, one per agent CLI)")

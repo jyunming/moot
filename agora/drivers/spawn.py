@@ -127,9 +127,10 @@ class SpawnDriver(Driver):
 
         try:
             code, out, err = await self._run(argv, cwd=self.working_dir(seat), stdin=stdin,
-                                             timeout=self.timeout_s)
+                                             timeout=seat.timeout_s or self.timeout_s)
         except asyncio.TimeoutError:
-            return WakeResult.failure(f"{self.binary} exceeded {self.timeout_s}s")
+            return WakeResult.failure(
+                f"{self.binary} exceeded {seat.timeout_s or self.timeout_s}s")
         except FileNotFoundError:
             return WakeResult.failure(f"{self.binary} is not on PATH")
 
@@ -155,14 +156,20 @@ class ClaudeDriver(SpawnDriver):
         import uuid
         return str(uuid.uuid4())
 
+    def tool_profile(self, seat: Seat) -> list[str]:
+        if seat.executing:
+            # Editing is the job; the agora tools stay available so the worker can
+            # report back. `--strict-mcp-config` still keeps other servers out.
+            return ["--permission-mode", "acceptEdits"]
+        return ["--allowedTools", "mcp__agora", "--permission-mode", "manual"]
+
     def argv(self, seat: Seat, prompt: str, session: str | None) -> list[str]:
         cfg = json.dumps(agora_mcp_config(seat.agent, self.db), ensure_ascii=False)
         argv = [
             self.binary, "-p", prompt,
             "--mcp-config", cfg,
             "--strict-mcp-config",       # nothing but Agora; no inherited servers
-            "--allowedTools", "mcp__agora",
-            "--permission-mode", "manual",
+            *self.tool_profile(seat),
             "--output-format", "json",
             *self.effort_argv(seat),
         ]
@@ -243,8 +250,9 @@ class CodexDriver(SpawnDriver):
         return ["-c", f'model_reasoning_effort="{seat.effort}"'] if seat.effort else []
 
     def working_dir(self, seat: Seat) -> str:
-        """Empty scratch dir for deliberation; the real cwd only when executing."""
-        if seat.cfg.get("capability") == "execute":
+        """Empty scratch dir for deliberation; the real workspace only when the
+        two-key rule has actually turned."""
+        if seat.executing:
             return seat.cwd
         sandbox = Path(self.db).parent / "sandbox" / seat.agent
         sandbox.mkdir(parents=True, exist_ok=True)
@@ -291,6 +299,9 @@ class CopilotDriver(SpawnDriver):
 
     _RESUME = re.compile(r"--resume=([0-9a-f-]{16,})", re.I)
 
+    def tool_profile(self, seat: Seat) -> list[str]:
+        return [] if seat.executing else ["--deny-tool", "shell", "--deny-tool", "write"]
+
     def argv(self, seat: Seat, prompt: str, session: str | None) -> list[str]:
         cfg = json.dumps(agora_mcp_config(seat.agent, self.db), ensure_ascii=False)
         argv = [
@@ -299,8 +310,7 @@ class CopilotDriver(SpawnDriver):
             "--additional-mcp-config", cfg,
             "--disable-builtin-mcps",     # no github-mcp-server in a debate seat
             "--allow-all-tools",          # required for non-interactive; narrowed below
-            "--deny-tool", "shell",
-            "--deny-tool", "write",
+            *self.tool_profile(seat),
             "--no-ask-user",              # nothing is watching; never block on a question
             "--no-color",
             *self.effort_argv(seat),
@@ -334,13 +344,16 @@ class GeminiDriver(SpawnDriver):
     def effort_argv(self, seat: Seat) -> list[str]:
         return []          # no reasoning-effort knob on this CLI
 
+    def tool_profile(self, seat: Seat) -> list[str]:
+        return ["--approval-mode", "auto_edit" if seat.executing else "plan"]
+
     def argv(self, seat: Seat, prompt: str, session: str | None) -> list[str]:
         import uuid
         return [
             self.binary,
             "-p", prompt,
             "--session-id", str(uuid.uuid4()),
-            "--approval-mode", "plan",          # read-only; deliberation, not edits
+            *self.tool_profile(seat),
             "--allowed-mcp-server-names", f"agora-{seat.agent}",
             "-o", "text",
             *self.extra_argv,
@@ -366,12 +379,15 @@ class AgyDriver(SpawnDriver):
 
     _CONV = re.compile(r'"conversation_id"\s*:\s*"([^"]+)"')
 
+    def tool_profile(self, seat: Seat) -> list[str]:
+        return ["--mode", "accept-edits" if seat.executing else "plan"]
+
     def argv(self, seat: Seat, prompt: str, session: str | None) -> list[str]:
         # --mode plan is Antigravity's read-only mode: it cannot edit files, which
         # is the right posture for a seat that deliberates. It still calls MCP
         # tools, so the board stays reachable.
-        return [self.binary, "-p", prompt, "--mode", "plan", "--output-format", "json",
-                *self.effort_argv(seat), *self.extra_argv]
+        return [self.binary, "-p", prompt, *self.tool_profile(seat),
+                "--output-format", "json", *self.effort_argv(seat), *self.extra_argv]
 
     def extract_session(self, stdout: str, stderr: str, proposed: str | None) -> str | None:
         m = self._CONV.search(stdout) or self._CONV.search(stderr)

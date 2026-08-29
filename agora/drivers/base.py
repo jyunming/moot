@@ -45,6 +45,14 @@ class Seat:
     #: -- 8.8x, against ~5s of process spawn and MCP handshake. Latency here is
     #: inference, not transport.
     effort: str | None = None
+    #: True only when BOTH keys turned: the seat was registered with
+    #: `--capability execute` AND it is being woken for an approved task on a work
+    #: topic. Never inferred from one alone -- an execute-capable seat sitting on a
+    #: meeting topic stays read-only.
+    executing: bool = False
+    #: Per-wake ceiling. A real task runs for many minutes; the deliberation
+    #: default would kill legitimate work part-way through.
+    timeout_s: float | None = None
 
     @property
     def cwd(self) -> str:
@@ -86,6 +94,17 @@ class Driver(abc.ABC):
     def working_dir(self, seat: Seat) -> str:
         """Where this CLI actually runs. Overridden where cwd IS the containment."""
         return seat.cwd
+
+    def tool_profile(self, seat: Seat) -> list[str]:
+        """Argv restricting what this seat may touch.
+
+        One method per adapter rather than conditionals sprinkled through argv(),
+        for the same reason effort_argv is one method: the blast-radius decision
+        has to be reviewable in a single place. Deliberation seats get the
+        narrowest surface the CLI offers; execute seats get enough to do the work
+        and nothing more.
+        """
+        return []
 
     @abc.abstractmethod
     async def wake(self, seat: Seat, prompt: str) -> WakeResult:

@@ -16,6 +16,8 @@ from pathlib import Path
 
 from .store import Store, StoreError, connect
 
+DIM_, RESET_ = "\033[2m", "\033[0m"
+
 # Windows consoles default to cp950 here; council traffic is Chinese from day one.
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -58,6 +60,8 @@ def cmd_agents_add(args) -> int:
         cfg["model"] = args.model
     if args.effort:
         cfg["effort"] = args.effort
+    if args.capability:
+        cfg["capability"] = args.capability
     if args.arg:
         # Escape hatch for machine-local quirks -- a broken plugin to switch off,
         # a flag a newer CLI needs. Keeping these per-seat means the drivers stay
@@ -87,7 +91,7 @@ def cmd_topic_new(args) -> int:
         seats.append(who)  # the human always holds a seat on their own topic
     tid = board.open_topic(args.slug, args.title, brief, who, seats=seats,
                            max_rounds=args.rounds, max_turns=args.turns, mode=args.mode,
-                           effort=args.effort)
+                           effort=args.effort, manager=args.manager)
     print(f"topic #{tid} `{args.slug}` opened with seats: {', '.join(seats)}")
     print(f"next: agora run {args.slug}")
     return 0
@@ -154,6 +158,22 @@ def cmd_install(args) -> int:
         print(f"[{'ok' if ok else 'FAIL'}] {name:<12} {detail}")
         rc |= 0 if ok else 1
     return rc
+
+
+def cmd_tasks(args) -> int:
+    board = _board(args)
+    t = board.topic(int(args.topic) if args.topic.isdigit() else args.topic)
+    rows = board.tasks(int(t["id"]), status=args.status)
+    if not rows:
+        print("no tasks")
+        return 0
+    for r in rows:
+        print(f"#{r['id']:<3} [{r['status']:<11}] {r['assignee']:<10} {r['title']}")
+        if r["branch"]:
+            print(f"      {DIM_}branch {r['branch']}  worktree {r['worktree']}{RESET_}")
+        if r["result"]:
+            print(f"      {r['result'].strip()[:300]}")
+    return 0
 
 
 def cmd_proposals(args) -> int:
@@ -306,6 +326,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--driver", choices=["stdio_json", "acp", "spawn", "none"])
     p.add_argument("--effort", choices=["low", "medium", "high"],
                    help="reasoning effort for this seat; the dominant latency knob")
+    p.add_argument("--capability", choices=["deliberate", "execute"],
+                   help="execute lets this seat edit files, but only for an approved "
+                        "task on a work topic (default: deliberate)")
     p.add_argument("--arg", action="append",
                    help="extra argv passed to this CLI every wake (repeatable)")
     p.set_defaults(fn=cmd_agents_add)
@@ -321,8 +344,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--turns", type=int, default=6, help="per-seat turn ceiling")
     p.add_argument("--effort", choices=["low", "medium", "high"],
                    help="override seat effort for this topic (low is ~9x faster)")
-    p.add_argument("--mode", choices=["debate", "discuss"], default="debate",
-                   help="debate: find the flaw (default). discuss: build on each other")
+    p.add_argument("--mode", choices=["debate", "discuss", "work"], default="debate",
+                   help="debate: find the flaw (default). discuss: build on each "
+                        "other. work: a manager assigns tasks and the team does them")
+    p.add_argument("--manager", help="work mode: the seat that plans and reviews")
     p.set_defaults(fn=cmd_topic_new)
 
     p = sub.add_parser("ls", help="list topics")
@@ -348,6 +373,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("agents", nargs="?", help="comma-separated; default all seats")
     p.add_argument("--dry-run", action="store_true", help="print the command instead of running it")
     p.set_defaults(fn=cmd_install)
+
+    p = sub.add_parser("tasks", help="the work plan and where each task has got to")
+    p.add_argument("topic")
+    p.add_argument("--status")
+    p.set_defaults(fn=cmd_tasks)
 
     p = sub.add_parser("proposals", help="what is waiting on you")
     p.add_argument("topic", nargs="?")

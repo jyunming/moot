@@ -19,6 +19,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import subprocess
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -38,6 +40,15 @@ FRAMING = {
         "objections that would change the outcome, and say what specifically would "
         "have to be true for you to withdraw one. If you agree, say so in a "
         "sentence and stop -- do not restate the argument in your own words."
+    ),
+    "work": (
+        "**You are the manager of this team.** Break the goal into tasks small "
+        "enough that one agent can finish each in a single sitting, and assign "
+        "each to the seat best suited to it -- use `agora_assign`. Give every task "
+        "an acceptance line, so 'done' is checkable rather than a matter of "
+        "opinion. Nothing runs until a human approves your plan, so put the whole "
+        "plan up at once. When work comes back, review it and use "
+        "`agora_task_update(id, \"accepted\"|\"rejected\", why)`."
     ),
     "discuss": (
         "**This is a working discussion, not a debate.** Build on what others have "
@@ -67,6 +78,9 @@ class Caps:
     #: quality is the thing being traded away. Use `low` for routine rounds,
     #: `high` when the ruling turns on catching a flaw.
     effort: str = "medium"
+    #: A real task runs for many minutes. The deliberation ceiling would kill
+    #: legitimate work part-way through and leave a half-finished worktree.
+    work_timeout_s: float = 1800.0
     #: Consecutive silent turns across all seats that mean the debate is spent.
     quiet_rounds_to_settle: int = 1
 
@@ -97,6 +111,8 @@ class Supervisor:
         Returns the terminal reason, which is also written to the board so the
         state is legible without reading logs.
         """
+        if self.store.topic(topic_id)["mode"] == "work":
+            return await self.run_work(topic_id)
         while True:
             reason = self._blocking_reason(topic_id)
             if reason:
@@ -218,6 +234,228 @@ class Supervisor:
                 kind="system", count_turn=False,
             )
         return result
+
+
+    # ------------------------------------------------------------------- work
+
+    async def run_work(self, topic_id: int) -> str:
+        """Team mode: a manager plans, a human approves, workers execute.
+
+        The states are deliberately few, and the order matters. Execution never
+        precedes approval because the only path out of `draft` is `Store.decide`
+        on the plan proposal -- this loop cannot route around it, because it has
+        no other way to reach an `assigned` task.
+        """
+        while True:
+            topic = self.store.topic(topic_id)
+            if topic["status"] != "open":
+                return f"topic is {topic['status']}"
+
+            # 1. A plan on the table is a human decision, and nothing else happens
+            #    until it is made.
+            plan = [p for p in self.store.proposals(topic_id, status="open")]
+            if plan:
+                self._park(topic_id, f"work plan #{plan[0]['id']} awaits your approval")
+                return f"work plan #{plan[0]['id']} awaits your approval"
+
+            # 2. Approved work runs, in parallel, each in its own worktree.
+            runnable = self._runnable_tasks(topic_id)
+            if runnable:
+                for task in runnable:            # sequential: git index is not concurrent
+                    self._ensure_workspace(topic_id, task)
+                await asyncio.gather(
+                    *(self._wake_for_task(topic_id, self.store.task(int(t["id"])))
+                      for t in runnable),
+                    return_exceptions=True,
+                )
+                continue
+
+            # 3. Finished or blocked work needs the manager's verdict.
+            manager = self._manager(topic_id)
+            reviewable = [t for t in self.store.tasks(topic_id)
+                          if t["status"] in {"done", "blocked"}]
+            if reviewable and manager and self._has_budget(topic_id, manager):
+                await self.wake_seat(topic_id, manager)
+                continue
+
+            # 4. Drafts the manager wrote go to the human as one plan.
+            if self.store.tasks(topic_id, status="draft"):
+                pid = self.store.submit_plan(topic_id, manager or topic["opened_by"])
+                self._park(topic_id, f"work plan #{pid} awaits your approval")
+                return f"work plan #{pid} awaits your approval"
+
+            # 5. Nothing planned yet: the manager plans.
+            if not self.store.tasks(topic_id) and manager and self._has_budget(topic_id, manager):
+                await self.wake_seat(topic_id, manager)
+                continue
+
+            reason = self._human_ask_reason(topic_id) or self._work_summary(topic_id)
+            self._park(topic_id, reason)
+            return reason
+
+    def _manager(self, topic_id: int) -> str | None:
+        for s in self.store.seats(topic_id):
+            if s["role"] == "manager":
+                return s["agent"]
+        return None
+
+    def _has_budget(self, topic_id: int, agent: str) -> bool:
+        s = self.store.seat(topic_id, agent)
+        return bool(s) and s["turns_used"] < min(s["max_turns"], self.caps.max_turns_per_seat)
+
+    def _runnable_tasks(self, topic_id: int) -> list:
+        """Assigned tasks whose worker may actually execute.
+
+        A task assigned to a seat without `--capability execute` is not silently
+        run read-only -- it is reported, because a task nobody can do is a planning
+        error the human should see rather than a mystery stall.
+        """
+        out = []
+        for t in self.store.tasks(topic_id, status="assigned"):
+            agent = t["assignee"]
+            cfg = json.loads(self.store.agent(agent)["driver_cfg"])
+            if cfg.get("capability") != "execute":
+                self.store.post(
+                    topic_id, "agora",
+                    f"task #{t['id']} is assigned to {agent}, which was not registered "
+                    f"with --capability execute. Re-register that seat or reassign.",
+                    kind="system", count_turn=False)
+                self.store.update_task(int(t["id"]), agent, "blocked",
+                                       "assignee has no execute capability")
+                continue
+            if self._has_budget(topic_id, agent):
+                out.append(t)
+        return out
+
+    def _ensure_workspace(self, topic_id: int, task) -> None:
+        """A branch and an isolated checkout per task.
+
+        Workers run concurrently; pointing several of them at one checkout would
+        have them overwrite each other's edits. Worktrees are also how the result
+        stays reviewable -- work lands on `agora/task-N`, never on the branch you
+        are sitting on, and merging stays a human git action.
+        """
+        if task["worktree"]:
+            return
+        tid = int(task["id"])
+        cfg = json.loads(self.store.agent(task["assignee"])["driver_cfg"])
+        repo = cfg.get("cwd") or str(Path.cwd())
+        branch = f"agora/task-{tid}"
+        tree = Path(self.store.path).parent / "work" / f"task-{tid}"
+        try:
+            subprocess.run(["git", "-C", repo, "rev-parse", "--git-dir"],
+                           capture_output=True, check=True)
+            tree.parent.mkdir(parents=True, exist_ok=True)
+            r = subprocess.run(["git", "-C", repo, "worktree", "add", "-b", branch,
+                                str(tree), "HEAD"], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace")
+            if r.returncode != 0:
+                raise RuntimeError(r.stderr.strip()[:300])
+            self.store.set_task_workspace(tid, branch, str(tree))
+        except Exception as exc:
+            # Not fatal: without git the task simply runs in the seat's own cwd,
+            # which is the user's choice to make by not using a repo.
+            log.warning("no worktree for task %s: %s", tid, exc)
+            self.store.set_task_workspace(tid, "", repo)
+            self.store.post(topic_id, "agora",
+                            f"task #{tid} has no isolated worktree ({exc}); "
+                            f"it will run directly in {repo}",
+                            kind="system", count_turn=False)
+
+    async def _wake_for_task(self, topic_id: int, task) -> WakeResult:
+        agent = task["assignee"]
+        meta = self.store.agent(agent)
+        cfg = json.loads(meta["driver_cfg"])
+        driver = self.driver_for(agent, meta["kind"])
+        if driver is None:
+            return WakeResult.failure(f"no driver for {agent}")
+
+        seat = Seat(
+            topic_id=topic_id,
+            topic_slug=self.store.topic(topic_id)["slug"],
+            agent=agent,
+            kind=meta["kind"],
+            cli_session=None,
+            cfg={**cfg, "cwd": task["worktree"] or cfg.get("cwd")},
+            # Effort for execution is the seat's own or the council default -- never
+            # the topic dial, so a `low` brainstorming setting cannot quietly make
+            # the actual work sloppy.
+            effort=cfg.get("effort") or self.caps.effort,
+            executing=True,                     # both keys turned: see Seat.executing
+            timeout_s=self.caps.work_timeout_s,
+        )
+        self.store.update_task(int(task["id"]), agent, "in_progress")
+        self.store.set_seat_state(topic_id, agent, "waking")
+        wake_id = self.store.record_wake(topic_id, agent)
+        try:
+            result = await driver.wake(seat, self.build_task_prompt(topic_id, task))
+        except Exception as exc:
+            log.exception("task driver failed for %s", agent)
+            result = WakeResult.failure(f"{type(exc).__name__}: {exc}")
+        self.store.finish_wake(wake_id, "ok" if result.ok else "error", result.detail)
+        self.store.set_seat_state(topic_id, agent, "idle" if result.ok else "failed")
+
+        if not result.ok and self.store.task(int(task["id"]))["status"] == "in_progress":
+            # The worker never got to report, so say so rather than leaving a task
+            # stuck in_progress forever with nobody waiting on it.
+            self.store.update_task(int(task["id"]), agent, "blocked",
+                                   f"wake failed: {result.detail}")
+        return result
+
+    def build_task_prompt(self, topic_id: int, task) -> str:
+        """What a worker is told. Deliberately NOT the council catch-up prompt --
+        a worker needs its task, where to do it, and how to report; the debate is
+        noise that would spend its context."""
+        topic = self.store.topic(topic_id)
+        tid = int(task["id"])
+        where = task["worktree"] or "your working directory"
+        lines = [
+            f"You are **{task['assignee']}**, working on an Agora team topic.",
+            "",
+            f"## Task #{tid}: {task['title']}",
+            "",
+            task["body"].strip() or "_(no further detail given)_",
+            "",
+        ]
+        if task["acceptance"]:
+            lines += ["**Done when:** " + task["acceptance"].strip(), ""]
+        lines += [
+            f"**Context:** {topic['title']}",
+            topic["brief"].strip(),
+            "",
+            "## Where to work",
+            "",
+            f"`{where}`",
+        ]
+        if task["branch"]:
+            lines.append(f"This is an isolated git worktree on branch `{task['branch']}`. "
+                         f"Commit there. Do not merge, do not push, and do not touch "
+                         f"any other branch -- a human reviews and merges.")
+        lines += [
+            "",
+            "## Reporting back",
+            "",
+            "Use the `agora` MCP tools; nothing else you write is read by anyone.",
+            "",
+            f"- `agora_task_update({tid}, \"done\", \"<what you changed and where>\")` when finished.",
+            f"- `agora_task_update({tid}, \"blocked\", \"<what stopped you>\")` if you cannot proceed.",
+            "- `agora_ask(topic, agent, question)` to ask the manager or a human first.",
+            "",
+            "Do only this task. If you notice other work that needs doing, say so in "
+            "your report rather than doing it.",
+        ]
+        return "\n".join(lines)
+
+    def _work_summary(self, topic_id: int) -> str:
+        tasks = self.store.tasks(topic_id)
+        if not tasks:
+            return "no tasks planned -- the manager has nothing to do or no budget left"
+        counts: dict[str, int] = {}
+        for t in tasks:
+            counts[t["status"]] = counts.get(t["status"], 0) + 1
+        if set(counts) <= {"accepted"}:
+            return f"work complete -- {counts.get('accepted', 0)} task(s) accepted"
+        return "work paused: " + ", ".join(f"{n} {st}" for st, n in sorted(counts.items()))
 
     # ------------------------------------------------------------- turn-taking
 
@@ -401,6 +639,10 @@ class Supervisor:
             "- `agora_say(topic, body)` — argue, add evidence, or disagree. One point, made well.",
             "- `agora_propose(topic, title, body)` — a concrete decision you want taken.",
             "- `agora_ask(topic, agent, question)` — put a question to one councillor by name.",
+            *(["- `agora_assign(topic, agent, title, body, acceptance)` — draft a task (manager only).",
+               "- `agora_tasks(topic)` — the current plan and its state.",
+               "- `agora_task_update(task_id, status, result)` — `accepted` / `rejected` on finished work."]
+              if topic["mode"] == "work" else []),
             "- `agora_vote(proposal_id, stance, rationale)` — `support` / `object` / `abstain`.",
             "- `agora_pass(topic, why)` — nothing to add. Passing is a real answer; say so and stop.",
             "",
