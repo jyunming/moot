@@ -137,7 +137,8 @@ class Store:
         # CREATE TABLE IF NOT EXISTS cannot add a column to a board that already
         # exists, so new columns are migrated explicitly. Cheap and idempotent.
         for table, column, ddl in (("topics", "mode", "TEXT NOT NULL DEFAULT 'debate'"),
-                                   ("topics", "effort", "TEXT")):
+                                   ("topics", "effort", "TEXT"),
+                                   ("tasks", "base_sha", "TEXT")):
             cols = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
             if column not in cols:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
@@ -629,10 +630,11 @@ class Store:
             self._emit(c, int(t["topic_id"]), "task", agent,
                        {"task_id": task_id, "action": status})
 
-    def set_task_workspace(self, task_id: int, branch: str, worktree: str) -> None:
+    def set_task_workspace(self, task_id: int, branch: str, worktree: str,
+                           base_sha: str = "") -> None:
         with self.tx() as c:
-            c.execute("UPDATE tasks SET branch = ?, worktree = ? WHERE id = ?",
-                      (branch, worktree, task_id))
+            c.execute("UPDATE tasks SET branch = ?, worktree = ?, base_sha = ? WHERE id = ?",
+                      (branch, worktree, base_sha, task_id))
 
     # -------------------------------------------------------------------- wakes
 

@@ -170,6 +170,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     proposal_id INTEGER REFERENCES proposals(id),   -- the plan gate
     branch      TEXT,                       -- work lands here, never on main
     worktree    TEXT,                       -- isolated checkout for this task
+    base_sha    TEXT,                       -- commit the branch was cut from
     result      TEXT NOT NULL DEFAULT '',   -- what the worker reported back
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT

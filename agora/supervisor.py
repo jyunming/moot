@@ -346,12 +346,15 @@ class Supervisor:
             subprocess.run(["git", "-C", repo, "rev-parse", "--git-dir"],
                            capture_output=True, check=True)
             tree.parent.mkdir(parents=True, exist_ok=True)
+            base = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                                  capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace").stdout.strip()
             r = subprocess.run(["git", "-C", repo, "worktree", "add", "-b", branch,
                                 str(tree), "HEAD"], capture_output=True, text=True,
                                encoding="utf-8", errors="replace")
             if r.returncode != 0:
                 raise RuntimeError(r.stderr.strip()[:300])
-            self.store.set_task_workspace(tid, branch, str(tree))
+            self.store.set_task_workspace(tid, branch, str(tree), base)
         except Exception as exc:
             # Not fatal: without git the task simply runs in the seat's own cwd,
             # which is the user's choice to make by not using a repo.
@@ -395,12 +398,47 @@ class Supervisor:
         self.store.finish_wake(wake_id, "ok" if result.ok else "error", result.detail)
         self.store.set_seat_state(topic_id, agent, "idle" if result.ok else "failed")
 
-        if not result.ok and self.store.task(int(task["id"]))["status"] == "in_progress":
-            # The worker never got to report, so say so rather than leaving a task
-            # stuck in_progress forever with nobody waiting on it.
-            self.store.update_task(int(task["id"]), agent, "blocked",
-                                   f"wake failed: {result.detail}")
+        tid = int(task["id"])
+        if self.store.task(tid)["status"] == "in_progress":
+            # The turn ended without the worker calling agora_task_update. Observed
+            # live: a seat committed real work to its branch and simply never
+            # reported. Leaving the task in_progress strands it -- the manager is
+            # never asked to review, and the loop then finds nothing runnable.
+            #
+            # So don't take the silence at face value in either direction. Look at
+            # what landed on the branch: commits are the evidence, and the report
+            # was only ever a claim about them.
+            if not result.ok:
+                self.store.update_task(tid, agent, "blocked", f"wake failed: {result.detail}")
+            else:
+                n = self._commits_on(self.store.task(tid))
+                if n:
+                    self.store.update_task(
+                        tid, agent, "done",
+                        f"(no report from the worker; {n} commit(s) on {task['branch']})")
+                else:
+                    self.store.update_task(
+                        tid, agent, "blocked",
+                        "turn ended with no report and nothing committed")
         return result
+
+    def _commits_on(self, task) -> int:
+        """Commits this task's branch has that its base did not.
+
+        The honest measure of whether work happened, independent of what the
+        worker said about it.
+        """
+        tree, base = task["worktree"], task["base_sha"]
+        if not tree or not base:
+            return 0
+        try:
+            r = subprocess.run(["git", "-C", tree, "rev-list", "--count", f"{base}..HEAD"],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace")
+            return int(r.stdout.strip() or 0) if r.returncode == 0 else 0
+        except Exception as exc:
+            log.warning("could not count commits for task %s: %s", task["id"], exc)
+            return 0
 
     def build_task_prompt(self, topic_id: int, task) -> str:
         """What a worker is told. Deliberately NOT the council catch-up prompt --

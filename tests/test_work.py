@@ -199,3 +199,19 @@ def test_the_worker_prompt_is_the_task_not_the_debate(team):
     assert "gateway tests pass" in prompt
     assert "agora_task_update" in prompt
     assert "IRRELEVANT-DEBATE-CHATTER" not in prompt
+
+
+def test_a_worker_that_finishes_without_reporting_is_not_left_stranded(team, tmp_path):
+    """Observed live: a seat committed real work and never called
+    agora_task_update. Commits are the evidence; the report was only a claim."""
+    topic = work_topic(team)
+    tid = team.draft_task(topic, "boss", "hand", "Add backoff")
+    team.decide(team.submit_plan(topic, "boss"), "human", approve=True)
+
+    # A worker that does nothing at all and says nothing: blocked, not "done".
+    silent = FakeDriver(team, script=lambda st, seat, p: None)
+    run(Supervisor(team, {"boss": silent, "hand": silent}, Caps(max_turns_per_seat=1)), topic)
+
+    task = team.task(tid)
+    assert task["status"] == "blocked", f"silent no-op should not read as done: {task['status']}"
+    assert "nothing committed" in task["result"]

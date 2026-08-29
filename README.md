@@ -108,9 +108,11 @@ sharpest argument in our first live debate came from a default-effort turn. Use
    subscription quota with nobody watching. Per-seat turn ceilings and per-hour wake
    ceilings park the topic for a human instead of burning a monthly allowance on
    chatter. A *failed* wake counts too, because metered CLIs charge for it.
-3. **Seats deliberate; they do not edit files.** An agent woken by a daemon is a
-   different risk class from one you are watching. Each adapter asks its CLI for the
-   narrowest tool surface it offers, and `agora doctor` verifies that empirically.
+3. **Execution needs two independent keys.** A seat edits files only if it was
+   registered `--capability execute` **and** it is woken for an approved task on a
+   `work` topic. An execute-capable seat sitting on a meeting topic stays read-only.
+   Each adapter expresses this as one `tool_profile()` method, so the blast-radius
+   decision is reviewable in one place.
 
 ## Debate or discussion
 
@@ -128,6 +130,36 @@ The difference is only in the prompt, and it is not cosmetic: a capable model to
 that disagreement is the product will **manufacture** disagreement to justify
 spending a turn. That is exactly what you want when you are stress-testing a
 decision, and exactly wrong when the room is trying to design something.
+
+## Meeting mode and team mode
+
+`debate` and `discuss` argue about **what to do**. `work` does it:
+
+```bash
+agora agents add mgr    claude --cwd ~/proj --effort low
+agora agents add worker codex  --cwd ~/proj --capability execute
+
+agora topic new ship-it --mode work --manager mgr --seats mgr,worker   --title "Add farewell() to app.py" --brief "..."
+
+agora run ship-it        # the manager plans, then stops
+agora approve 2 -m "go"  # only you can release work
+agora run ship-it --resume
+agora tasks ship-it
+```
+
+The manager drafts tasks; the whole plan goes to you as an ordinary proposal; and
+**approval is the only thing that turns a draft into runnable work** — `Store.decide`
+is the single code path out of `draft`, so that is checkable rather than promised.
+
+Work runs in a **git worktree per task**, on `agora/task-N`. Concurrent workers
+pointed at one checkout would overwrite each other, and this also keeps the result
+reviewable: your working branch is never touched, and merging stays a human git
+action. Nothing is pushed.
+
+A task assigned to a seat without execute capability comes back **blocked with the
+reason** — a task nobody can do is a planning error you should see, not a stall.
+And if a worker finishes without reporting, the branch is checked for commits:
+evidence beats the claim.
 
 ## @mentions
 
