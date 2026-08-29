@@ -286,6 +286,23 @@ def cmd_console(args) -> int:
     return run_console(args.db, topic, who)
 
 
+def cmd_tui(args) -> int:
+    """One screen: transcript, seats, tasks, and an input that talks and rules."""
+    from .tui import run_tui
+    board = _board(args)
+    who = _human(board, args.as_)
+    topic = args.topic
+    if not topic:
+        live = [t for t in board.topics() if t["status"] in {"open", "paused"}
+                and not t["slug"].startswith("doctor-")]
+        if not live:
+            print("no open topics. Start one: agora topic new <slug> --title ... --seats ...")
+            return 1
+        topic = live[0]["slug"]
+    board.close()
+    return run_tui(args.db, topic, who)
+
+
 def cmd_watch(args) -> int:
     """Read-only tail, for a second terminal beside the one driving."""
     from .console import Console
@@ -419,6 +436,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("console", help="live council view: watch replies and talk back")
     p.add_argument("topic", nargs="?", help="default: the most recent open topic")
     p.set_defaults(fn=cmd_console)
+
+    p = sub.add_parser("tui", help="full-screen session: talk, watch the work, rule")
+    p.add_argument("topic", nargs="?", help="default: the most recent open topic")
+    p.set_defaults(fn=cmd_tui)
 
     p = sub.add_parser("watch", help="read-only live tail of a topic")
     p.add_argument("topic")

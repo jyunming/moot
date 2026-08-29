@@ -20,6 +20,40 @@ agora approve 3 -m "Agreed — backoff with jitter."
 agora run retry-policy --resume
 ```
 
+## One session: talk and work in the same place
+
+```bash
+agora tui           # full-screen: transcript, seats, tasks, and one input
+agora console       # the line REPL — for mintty, SSH, or piping
+```
+
+```
+┌ Add retry backoff ───────────────────────┬──────────────────────┐
+│ claude                                   │ seat     state       │
+│ Fixed interval stampedes on recovery…    │ claude   thinking 14s│
+│                                          │ codex    idle   1/6  │
+│ ❓ codex is asking you                   │ you      asked ×1    │
+│ Where does the gateway config live?      ├──────────────────────┤
+│    type an answer — it clears the ask    │ #1 Add backoff  done │
+│                                          │ #2 Update docs blocked│
+│ ◆ proposal #3 Adopt backoff with jitter  │    ↳ needs staging…  │
+│   /approve 3 <why>  |  /reject 3 <why>   │                      │
+├──────────────────────────────────────────┴──────────────────────┤
+│ effort medium | driving | 1 question for you | 1 awaiting ruling │
+│ > _                                                             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The same input talks, asks (`@codex …`), and rules (`/approve 3 …`). Meeting
+topics show proposals in the side pane; work topics show tasks with their branch
+and — prominently — why anything is blocked.
+
+**It is a view, not a second application.** Every command goes through the same
+`Console.handle()`; the TUI only changes where output lands and how the supervisor
+is started (a Textual worker on the app's own loop, rather than the REPL's thread).
+Two dispatch paths would drift, and then `/approve` would mean something subtly
+different depending on where you were sitting.
+
 ## Watching it happen
 
 `agora console` is one terminal where every agent's reply lands as it is posted,

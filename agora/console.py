@@ -64,6 +64,7 @@ COMMANDS = {
     "/approve": "<id> [why] -- rule on a proposal (only you can)",
     "/reject": "<id> [why]",
     "/proposals": "what is waiting on you",
+    "/tasks": "the work plan and where each task has got to",
     "/seats": "who has budget left, who owes an answer",
     "/topic": "<slug> -- switch topic",
     "/help": "this list",
@@ -152,6 +153,10 @@ class Console:
         #: pick it up, you see the replies, you answer again. /auto off restores
         #: the explicit-only behaviour.
         self.auto = True
+        #: Where command output goes. The REPL prints; the TUI writes to a widget.
+        #: Both drive the same `handle()`, so a command cannot behave differently
+        #: in one surface than the other -- two dispatchers would drift.
+        self.emit = print
 
     # ------------------------------------------------------------------- state
 
@@ -188,18 +193,18 @@ class Console:
         store = connect(self.db)
         cursor = store.head()
         for m in store.transcript(self.topic_id)[-6:]:
-            print(f"\n{DIM}{m['author']}{RESET}  {m['body'].strip()[:400]}")
+            self.emit(f"\n{DIM}{m['author']}{RESET}  {m['body'].strip()[:400]}")
         for a in store.open_mentions(self.topic_id, self.me):
-            print(_ask_banner(a["asker"], a["question"]))
+            self.emit(_ask_banner(a["asker"], a["question"]))
         while not self.stop.is_set():
             try:
                 for ev in store.events_since(cursor, self.topic_id):
                     cursor = ev.id
                     line = _fmt_event(store, ev, self.me)
                     if line:
-                        print(line)
+                        self.emit(line)
             except Exception as exc:                    # never kill the console
-                print(f"{RED}poller: {exc}{RESET}")
+                self.emit(f"{RED}poller: {exc}{RESET}")
             time.sleep(1.0)
         store.close()
 
@@ -215,11 +220,11 @@ class Console:
                 store.set_topic_status(self.topic_id, "open", self.me, "resumed from console")
             sup = Supervisor(store, build_drivers(store), Caps(effort=self.effort()))
             reason = asyncio.run(sup.run_topic(self.topic_id))
-            print(f"\n{DIM}— council stopped: {reason}{RESET}")
+            self.emit(f"\n{DIM}— council stopped: {reason}{RESET}")
             for a in store.open_mentions(self.topic_id, self.me):
-                print(_ask_banner(a["asker"], a["question"]))
+                self.emit(_ask_banner(a["asker"], a["question"]))
         except Exception as exc:
-            print(f"\n{RED}— council failed: {exc}{RESET}")
+            self.emit(f"\n{RED}— council failed: {exc}{RESET}")
         finally:
             store.close()
             self.driving.clear()
@@ -243,12 +248,13 @@ class Console:
             "effort": self._effort, "asks": self._asks, "nudge": self._nudge,
             "auto": self._auto,
             "proposals": self._proposals, "seats": self._seats, "topic": self._switch,
+            "tasks": self._tasks,
         }.get(cmd)
         if cmd in {"approve", "reject"}:
             self._decide(cmd, rest)
             return True
         if fn is None:
-            print(f"{RED}unknown /{cmd}{RESET} — /help")
+            self.emit(f"{RED}unknown /{cmd}{RESET} — /help")
             return True
         return fn(rest) is not False
 
@@ -256,13 +262,13 @@ class Console:
         if line.startswith("@"):
             target, _, question = line[1:].partition(" ")
             if not question.strip():
-                print(f"{RED}usage: @agent your question{RESET}")
+                self.emit(f"{RED}usage: @agent your question{RESET}")
                 return True
             try:
                 self.store.ask(self.topic_id, self.me, target, question.strip())
-                print(f"{DIM}asked {target} — they answer next{RESET}")
+                self.emit(f"{DIM}asked {target} — they answer next{RESET}")
             except StoreError as exc:
-                print(f"{RED}{exc}{RESET}")
+                self.emit(f"{RED}{exc}{RESET}")
             return True
 
         answered = self.pending_asks()
@@ -270,43 +276,43 @@ class Console:
         self.store.post(self.topic_id, self.me, line, count_turn=False)
         if answered:
             who = ", ".join(sorted({a["asker"] for a in answered}))
-            print(f"{DIM}answers {who}{RESET}")
+            self.emit(f"{DIM}answers {who}{RESET}")
         if self.auto and not self.driving.is_set():
             # What you just said is new board state, so every seat is behind again
             # and the council has something to react to. Making you type /run here
             # is what made this feel like a batch job rather than a conversation.
             self._run("")
         elif not self.driving.is_set():
-            print(f"{DIM}council idle — /run when you want them to pick it up{RESET}")
+            self.emit(f"{DIM}council idle — /run when you want them to pick it up{RESET}")
         return True
 
     def _help(self, _: str) -> None:
         for cmd, why in COMMANDS.items():
-            print(f"  {CYAN}{cmd:<11}{RESET} {why}")
+            self.emit(f"  {CYAN}{cmd:<11}{RESET} {why}")
 
     def _run(self, _: str) -> None:
         if self.driving.is_set():
-            print(f"{DIM}already driving{RESET}")
+            self.emit(f"{DIM}already driving{RESET}")
             return
         self.driving.set()
         threading.Thread(target=self._drive, daemon=True).start()
-        print(f"{DIM}· council thinking at effort {self.effort()} — keep typing{RESET}")
+        self.emit(f"{DIM}· council thinking at effort {self.effort()} — keep typing{RESET}")
 
     def _auto(self, rest: str) -> None:
         if rest in {"on", "off"}:
             self.auto = rest == "on"
-        print(f"{DIM}auto-wake {'on — posting resumes the council' if self.auto else 'off — /run to drive'}{RESET}")
+        self.emit(f"{DIM}auto-wake {'on — posting resumes the council' if self.auto else 'off — /run to drive'}{RESET}")
 
     def _stop(self, _: str) -> None:
         self.store.set_topic_status(self.topic_id, "paused", self.me, "stopped from console")
-        print(f"{DIM}pausing after the current turn{RESET}")
+        self.emit(f"{DIM}pausing after the current turn{RESET}")
 
     def _effort(self, rest: str) -> None:
         """The brainstorming dial: cheap and wide, then deep on what survived."""
         if rest not in {"low", "medium", "high"}:
-            print(f"  effort is {BOLD}{self.effort()}{RESET}   "
+            self.emit(f"  effort is {BOLD}{self.effort()}{RESET}   "
                   f"{DIM}/effort low|medium|high{RESET}")
-            print(f"  {DIM}low ≈ 9x faster and thinner; high for a call that turns on "
+            self.emit(f"  {DIM}low ≈ 9x faster and thinner; high for a call that turns on "
                   f"catching a flaw{RESET}")
             return
         with self.store.tx() as c:
@@ -316,35 +322,47 @@ class Console:
         # outranks the council default. A concurrent round's wakes all start
         # together, so the change lands on the round after the current one.
         when = " — from the next round" if self.driving.is_set() else ""
-        print(f"{DIM}council effort → {rest}{when}{RESET}")
+        self.emit(f"{DIM}council effort → {rest}{when}{RESET}")
 
     def _asks(self, _: str) -> None:
         asks = self.pending_asks()
         if not asks:
-            print(f"{DIM}nothing is waiting on you{RESET}")
+            self.emit(f"{DIM}nothing is waiting on you{RESET}")
             return
         for a in asks:
-            print(_ask_banner(a["asker"], a["question"]))
+            self.emit(_ask_banner(a["asker"], a["question"]))
 
     def _seats(self, _: str) -> None:
         for s in self.store.seats(self.topic_id):
             owed = len(self.store.open_mentions(self.topic_id, s["agent"]))
             flag = f"  {YELLOW}{owed} open ask(s){RESET}" if owed else ""
-            print(f"  {s['agent']:<12} {s['kind']:<9} {s['state']:<8} "
+            self.emit(f"  {s['agent']:<12} {s['kind']:<9} {s['state']:<8} "
                   f"{s['turns_used']}/{s['max_turns']} turns{flag}")
+
+    def _tasks(self, _: str) -> None:
+        rows = self.store.tasks(self.topic_id)
+        if not rows:
+            self.emit(f"{DIM}no tasks — this is not a work topic, or nothing is planned{RESET}")
+            return
+        for t in rows:
+            self.emit(f"  #{t['id']} [{t['status']}] {t['title']} — {t['assignee']}")
+            if t["branch"]:
+                self.emit(f"       {DIM}{t['branch']}{RESET}")
+            if t["result"]:
+                self.emit(f"       {t['result'].strip()[:200]}")
 
     def _proposals(self, _: str) -> None:
         for p in self.store.proposals(self.topic_id):
             votes = ", ".join(f"{v['agent']}:{v['stance']}" for v in self.store.votes(p["id"]))
-            print(f"  #{p['id']} [{p['status']}] {p['title']}  {DIM}{votes}{RESET}")
+            self.emit(f"  #{p['id']} [{p['status']}] {p['title']}  {DIM}{votes}{RESET}")
 
     def _switch(self, rest: str) -> None:
         try:
             self.topic = self.store.topic(rest)
             self.topic_id = int(self.topic["id"])
-            print(f"{DIM}now on `{self.topic['slug']}`{RESET}")
+            self.emit(f"{DIM}now on `{self.topic['slug']}`{RESET}")
         except StoreError as exc:
-            print(f"{RED}{exc}{RESET}")
+            self.emit(f"{RED}{exc}{RESET}")
 
     def _nudge(self, agent: str) -> None:
         import asyncio
@@ -358,40 +376,40 @@ class Console:
                 r = asyncio.run(Supervisor(store, build_drivers(store, [agent]))
                                 .wake_seat(self.topic_id, agent))
                 if not r.ok:
-                    print(f"\n{RED}{agent}: {r.detail}{RESET}")
+                    self.emit(f"\n{RED}{agent}: {r.detail}{RESET}")
             finally:
                 store.close()
 
         threading.Thread(target=work, daemon=True).start()
-        print(f"{DIM}waking {agent}...{RESET}")
+        self.emit(f"{DIM}waking {agent}...{RESET}")
 
     def _decide(self, cmd: str, rest: str) -> None:
         pid_s, _, why = rest.partition(" ")
         if not pid_s.isdigit():
-            print(f"{RED}usage: /{cmd} <proposal id> [reason]{RESET}")
+            self.emit(f"{RED}usage: /{cmd} <proposal id> [reason]{RESET}")
             return
         try:
             self.store.decide(int(pid_s), self.me, cmd == "approve", why.strip())
         except StoreError as exc:
-            print(f"{RED}{exc}{RESET}")
+            self.emit(f"{RED}{exc}{RESET}")
 
     # -------------------------------------------------------------------- loop
 
     def run(self) -> int:
-        print(BANNER)
-        print(f"{BOLD}{self.topic['title']}{RESET}  {DIM}(`{self.topic['slug']}`, "
+        self.emit(BANNER)
+        self.emit(f"{BOLD}{self.topic['title']}{RESET}  {DIM}(`{self.topic['slug']}`, "
               f"{self.topic['status']}, effort {self.effort()}){RESET}")
-        print(f"{DIM}you are {self.me}. /run to start, /help for commands.{RESET}")
+        self.emit(f"{DIM}you are {self.me}. /run to start, /help for commands.{RESET}")
 
         threading.Thread(target=self._poll, daemon=True).start()
         try:
             self._input_loop()
         except KeyboardInterrupt:
-            print()
+            self.emit()
         finally:
             self.stop.set()
             self.store.close()
-        print(f"{DIM}left the console. The board keeps everything: "
+        self.emit(f"{DIM}left the console. The board keeps everything: "
               f"agora show {self.topic['slug']}{RESET}")
         return 0
 
@@ -406,14 +424,14 @@ class Console:
         """
         if not HAVE_PTK or not sys.stdin.isatty():
             if HAVE_PTK is False:
-                print(f"{DIM}(pip install prompt_toolkit for a prompt that survives "
+                self.emit(f"{DIM}(pip install prompt_toolkit for a prompt that survives "
                       f"incoming messages){RESET}")
             self._plain_loop()
             return
         try:
             self._ptk_loop()
         except Exception as exc:
-            print(f"{DIM}(plain prompt: {type(exc).__name__} — for the full console "
+            self.emit(f"{DIM}(plain prompt: {type(exc).__name__} — for the full console "
                   f"use Windows Terminal, PowerShell or cmd rather than mintty){RESET}")
             self._plain_loop()
 

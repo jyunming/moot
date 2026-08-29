@@ -1,0 +1,141 @@
+"""The full-screen session, driven headlessly.
+
+Textual ships a pilot that runs the real app with a virtual terminal, so there is
+no excuse for shipping this unexecuted -- which is exactly what happened to the
+prompt_toolkit path, claimed for three turns before anything ran it.
+
+These drive real keystrokes through the real widgets and assert on the board
+afterwards: typing posts, @ directs, /approve rules, and a work topic shows its
+tasks. What they cannot check is whether it *looks* right in a terminal.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+pytest.importorskip("textual")
+
+from textual.widgets import DataTable, Input, RichLog   # noqa: E402
+
+from agora.store import connect                          # noqa: E402
+from agora.tui import AgoraApp                           # noqa: E402
+
+
+@pytest.fixture()
+def board(tmp_path):
+    s = connect(tmp_path / "board.db", init=True)
+    s.add_agent("me", "human")
+    s.add_agent("claude", "claude", driver="spawn")
+    s.add_agent("codex", "codex", driver="spawn",
+                driver_cfg={"capability": "execute", "cwd": str(tmp_path)})
+    yield s
+    s.close()
+
+
+def app_for(tmp_path, board, slug="t", **kw):
+    board.open_topic(slug, "A topic", "the brief", "me",
+                     seats=("claude", "codex", "me"), **kw)
+    return AgoraApp(tmp_path / "board.db", slug, "me")
+
+
+async def type_line(pilot, app, text: str) -> None:
+    app.query_one("#say", Input).value = text
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_the_app_starts_with_every_pane(tmp_path, board):
+    app = app_for(tmp_path, board)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.query_one("#transcript", RichLog)
+        assert app.query_one("#seats", DataTable).row_count == 3
+        assert "A topic" in str(app.title)
+
+
+@pytest.mark.asyncio
+async def test_typing_posts_to_the_board(tmp_path, board):
+    app = app_for(tmp_path, board)
+    async with app.run_test() as pilot:
+        app.board.auto = False          # do not start a real supervisor in a test
+        await type_line(pilot, app, "the config lives in ops/")
+
+    bodies = [m["body"] for m in board.transcript(app.board.topic_id)]
+    assert "the config lives in ops/" in bodies
+
+
+@pytest.mark.asyncio
+async def test_at_mention_from_the_tui_directs_a_question(tmp_path, board):
+    app = app_for(tmp_path, board)
+    async with app.run_test() as pilot:
+        app.board.auto = False
+        await type_line(pilot, app, "@codex what does the gateway do today?")
+
+    asks = board.open_mentions(app.board.topic_id)
+    assert [(a["asker"], a["target"]) for a in asks] == [("me", "codex")]
+
+
+@pytest.mark.asyncio
+async def test_answering_an_ask_clears_it_and_it_was_shown_first(tmp_path, board):
+    app = app_for(tmp_path, board)
+    board.ask(app.board.topic_id, "claude", "me", "Where does the config live?")
+    async with app.run_test() as pilot:
+        app.board.auto = False
+        await pilot.pause()
+        assert app.board.pending_asks(), "the question should be outstanding at start"
+        await type_line(pilot, app, "ops/gateway.yaml")
+
+    assert app.board.pending_asks() == [], "answering did not clear the question"
+
+
+@pytest.mark.asyncio
+async def test_a_human_can_rule_on_a_proposal_from_the_input(tmp_path, board):
+    """The one power agents do not have, exercised through the real UI."""
+    app = app_for(tmp_path, board)
+    pid = board.propose(app.board.topic_id, "claude", "Adopt backoff", "with jitter")
+    async with app.run_test() as pilot:
+        app.board.auto = False
+        await type_line(pilot, app, f"/approve {pid} agreed")
+
+    p = board.proposal(pid)
+    assert (p["status"], p["decided_by"]) == ("approved", "me")
+
+
+@pytest.mark.asyncio
+async def test_a_work_topic_shows_its_tasks_and_blocked_reasons(tmp_path, board):
+    app = app_for(tmp_path, board, slug="w", mode="work", manager="claude")
+    tid = board.draft_task(app.board.topic_id, "claude", "codex", "Add backoff")
+    board.decide(board.submit_plan(app.board.topic_id, "claude"), "me", approve=True)
+    board.update_task(tid, "codex", "blocked", "needs the staging credentials")
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        work = app.query_one("#work", DataTable)
+        cells = [str(work.get_cell_at((r, c)))
+                 for r in range(work.row_count) for c in range(3)]
+
+    assert any("Add backoff" in c for c in cells)
+    assert any("blocked" in c for c in cells)
+    # A blocked task is the thing most likely to be waiting on a person, so the
+    # reason has to be visible in the pane, not only a status word. (The full text
+    # is also a system message in the transcript.)
+    assert any("staging" in c for c in cells)
+
+
+@pytest.mark.asyncio
+async def test_effort_is_retunable_from_the_tui(tmp_path, board):
+    app = app_for(tmp_path, board)
+    async with app.run_test() as pilot:
+        await type_line(pilot, app, "/effort high")
+    assert app.board.effort() == "high"
+
+
+@pytest.mark.asyncio
+async def test_bracketed_agent_text_is_not_eaten_as_markup(tmp_path, board):
+    """Agent bodies routinely contain [brackets]; unescaped, Rich would swallow
+    them and the transcript would silently lose content."""
+    app = app_for(tmp_path, board)
+    rendered = AgoraApp._render_message(
+        {"author": "claude", "kind": "say", "body": "see [balance.json] line [12]"})
+    assert "[balance.json]" in rendered.replace("\\[", "[")
