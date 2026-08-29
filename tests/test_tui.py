@@ -227,3 +227,50 @@ async def test_reset_needs_confirming_and_keeps_the_seats(tmp_path, board):
 
     assert board.topics() == []
     assert {a["name"] for a in board.agents()} >= {"claude", "codex"}
+
+
+@pytest.mark.asyncio
+async def test_the_session_opens_on_an_empty_board(tmp_path, board):
+    """You must be able to start from inside. Being told to go back to the shell
+    first is the exact break this session exists to remove."""
+    app = AgoraApp(tmp_path / "board.db", None, "me")     # no topic at all
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.board.topic_id is None
+        assert "no topic" in str(app.sub_title)
+
+        await type_line(pilot, app, "/new first Should retries back off?")
+        await pilot.pause()
+
+        assert app.board.topic["slug"] == "first"
+        # A first topic seats everyone registered -- there was nothing to carry over.
+        seats = {s["agent"] for s in board.seats(app.board.topic_id)}
+        assert {"claude", "codex", "me"} <= seats
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_board_leaves_you_inside_it(tmp_path, board):
+    """Ending the session on /reset would throw you out of the very thing you
+    would use to start again."""
+    app = app_for(tmp_path, board)
+    async with app.run_test() as pilot:
+        app.board.auto = False
+        await type_line(pilot, app, "/reset yes")
+        await pilot.pause()
+
+        assert app.board.topic_id is None, "should still be running, with no topic"
+        assert "no topic" in str(app.sub_title)
+
+        await type_line(pilot, app, "/new fresh A brand new question")
+        await pilot.pause()
+        assert app.board.topic["slug"] == "fresh"
+
+
+@pytest.mark.asyncio
+async def test_topic_bound_commands_say_so_rather_than_crashing(tmp_path, board):
+    app = AgoraApp(tmp_path / "board.db", None, "me")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for line in ("hello", "/run", "/seats", "/tasks", "/effort high", "@codex hi"):
+            await type_line(pilot, app, line)       # must not raise
+        assert app.board.topic_id is None

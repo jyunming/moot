@@ -111,21 +111,12 @@ class AgoraApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        t = self.board.store.topic(self.board.topic_id)
-        self.title = t["title"]
-        self.sub_title = f"{t['slug']} · {t['mode']}"
-
         seats = self.query_one("#seats", DataTable)
         seats.add_columns("seat", "state", "turns")
         work = self.query_one("#work", DataTable)
         work.add_columns("#", "what", "state")
 
-        log = self.query_one("#transcript", RichLog)
-        for m in self.board.store.transcript(self.board.topic_id)[-40:]:
-            log.write(self._render_message(m))
-        for a in self.board.pending_asks():
-            log.write(self._render_ask(a["asker"], a["question"]))
-        self.cursor = self.board.store.head()
+        self.rebind_topic()
 
         # Paint once now, not only on the first tick -- otherwise every pane sits
         # empty for a second on open, which reads as "nothing here" exactly when
@@ -158,6 +149,12 @@ class AgoraApp(App):
     def refresh_board(self) -> None:
         """One tick: drain new events into the log, then repaint state."""
         store = self.board.store
+        if self.board.topic_id is None:
+            self.query_one("#seats", DataTable).clear()
+            self.query_one("#work", DataTable).clear()
+            self.query_one("#status", Static).update(
+                "no topic  |  /new <slug> <title> to start one")
+            return
         try:
             for ev in store.events_since(self.cursor, self.board.topic_id):
                 self.cursor = ev.id
@@ -242,12 +239,27 @@ class AgoraApp(App):
         self.query_one("#status", Static).update("  |  ".join(bits))
 
     def rebind_topic(self) -> None:
-        """Repoint every pane at whatever topic the board is now on."""
+        """Repoint every pane at whatever topic the board is now on -- including
+        no topic at all, which is a legitimate place to be sitting."""
+        log = self.query_one("#transcript", RichLog)
+        log.clear()
+        if self.board.topic_id is None:
+            self.title = "Agora"
+            self.sub_title = "no topic"
+            log.write("[dim]Nothing on the board yet.[/dim]")
+            log.write("")
+            log.write("Start one:  [cyan]/new <slug> <title>[/cyan]")
+            log.write("[dim]e.g.  /new retries Should webhook retries back off?[/dim]")
+            log.write("")
+            log.write("[dim]Then type the detail the council needs, then /run.[/dim]")
+            log.write("[dim]/help lists everything.[/dim]")
+            log.write("[dim]Then type any detail the council needs, and /run.[/dim]")
+            self.cursor = self.board.store.head()
+            self.refresh_board()
+            return
         t = self.board.store.topic(self.board.topic_id)
         self.title = t["title"]
         self.sub_title = f"{t['slug']} · {t['mode']}"
-        log = self.query_one("#transcript", RichLog)
-        log.clear()
         for m in self.board.store.transcript(self.board.topic_id)[-40:]:
             log.write(self._render_message(m))
         for a in self.board.pending_asks():

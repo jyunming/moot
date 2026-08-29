@@ -145,11 +145,19 @@ class _ConsoleCompleter:
 
 
 class Console:
-    def __init__(self, db: Path | str | None, topic_ref: str, me: str):
+    def __init__(self, db: Path | str | None, topic_ref: str | None, me: str):
         self.db = db
         self.store = connect(db)
-        self.topic = self.store.topic(int(topic_ref) if str(topic_ref).isdigit() else topic_ref)
-        self.topic_id = int(self.topic["id"])
+        #: A session with no topic is a real state, not an error. You have to be
+        #: able to open the thing on an empty board and start from inside it --
+        #: being told to go back to the shell first is exactly the break this
+        #: session exists to remove.
+        self.topic = None
+        self.topic_id = None
+        if topic_ref is not None:
+            self.topic = self.store.topic(
+                int(topic_ref) if str(topic_ref).isdigit() else topic_ref)
+            self.topic_id = int(self.topic["id"])
         self.me = me
         self.stop = threading.Event()
         self.driving = threading.Event()
@@ -166,13 +174,25 @@ class Console:
     # ------------------------------------------------------------------- state
 
     def seat_names(self) -> list[str]:
+        if self.topic_id is None:      # nothing seated yet; offer everyone registered
+            return [a["name"] for a in self.store.agents()
+                    if a["kind"] not in {"human", "external"}]
         return [s["agent"] for s in self.store.seats(self.topic_id) if s["agent"] != self.me]
 
     def pending_asks(self):
-        return self.store.open_mentions(self.topic_id, self.me)
+        return [] if self.topic_id is None else self.store.open_mentions(self.topic_id, self.me)
 
     def effort(self) -> str:
+        if self.topic_id is None:
+            return "medium"
         return self.store.topic(self.topic_id)["effort"] or "medium"
+
+    def _require_topic(self) -> bool:
+        if self.topic_id is None:
+            self.emit(f"{DIM}no topic yet — /new <slug> <title> to start one"
+                      f"{', or /topic <slug>' if self.store.topics() else ''}{RESET}")
+            return False
+        return True
 
     def toolbar(self) -> str:  # pragma: no cover - UI
         asks = len(self.pending_asks())
@@ -197,6 +217,11 @@ class Console:
         """Tail the board. Own Store: sqlite3 connections are per-thread."""
         store = connect(self.db)
         cursor = store.head()
+        if self.topic_id is None:
+            while not self.stop.is_set():
+                time.sleep(1.0)
+            store.close()
+            return
         for m in store.transcript(self.topic_id)[-6:]:
             self.emit(f"\n{DIM}{m['author']}{RESET}  {m['body'].strip()[:400]}")
         for a in store.open_mentions(self.topic_id, self.me):
@@ -265,6 +290,8 @@ class Console:
         return fn(rest) is not False
 
     def _speak(self, line: str) -> bool:
+        if not self._require_topic():
+            return True
         if line.startswith("@"):
             target, _, question = line[1:].partition(" ")
             if not question.strip():
@@ -297,6 +324,8 @@ class Console:
             self.emit(f"  {CYAN}{cmd:<11}{RESET} {why}")
 
     def _run(self, _: str) -> None:
+        if not self._require_topic():
+            return
         if self.driving.is_set():
             self.emit(f"{DIM}already driving{RESET}")
             return
@@ -310,10 +339,14 @@ class Console:
         self.emit(f"{DIM}auto-wake {'on — posting resumes the council' if self.auto else 'off — /run to drive'}{RESET}")
 
     def _stop(self, _: str) -> None:
+        if not self._require_topic():
+            return
         self.store.set_topic_status(self.topic_id, "paused", self.me, "stopped from console")
         self.emit(f"{DIM}pausing after the current turn{RESET}")
 
     def _effort(self, rest: str) -> None:
+        if not self._require_topic():
+            return
         """The brainstorming dial: cheap and wide, then deep on what survived."""
         if rest not in {"low", "medium", "high"}:
             self.emit(f"  effort is {BOLD}{self.effort()}{RESET}   "
@@ -331,6 +364,8 @@ class Console:
         self.emit(f"{DIM}council effort → {rest}{when}{RESET}")
 
     def _asks(self, _: str) -> None:
+        if not self._require_topic():
+            return
         asks = self.pending_asks()
         if not asks:
             self.emit(f"{DIM}nothing is waiting on you{RESET}")
@@ -339,6 +374,8 @@ class Console:
             self.emit(_ask_banner(a["asker"], a["question"]))
 
     def _seats(self, _: str) -> None:
+        if not self._require_topic():
+            return
         for s in self.store.seats(self.topic_id):
             owed = len(self.store.open_mentions(self.topic_id, s["agent"]))
             flag = f"  {YELLOW}{owed} open ask(s){RESET}" if owed else ""
@@ -346,6 +383,8 @@ class Console:
                   f"{s['turns_used']}/{s['max_turns']} turns{flag}")
 
     def _tasks(self, _: str) -> None:
+        if not self._require_topic():
+            return
         rows = self.store.tasks(self.topic_id)
         if not rows:
             self.emit(f"{DIM}no tasks — this is not a work topic, or nothing is planned{RESET}")
@@ -358,6 +397,8 @@ class Console:
                 self.emit(f"       {t['result'].strip()[:200]}")
 
     def _proposals(self, _: str) -> None:
+        if not self._require_topic():
+            return
         for p in self.store.proposals(self.topic_id):
             votes = ", ".join(f"{v['agent']}:{v['stance']}" for v in self.store.votes(p["id"]))
             self.emit(f"  #{p['id']} [{p['status']}] {p['title']}  {DIM}{votes}{RESET}")
@@ -415,18 +456,18 @@ class Console:
     def _land_somewhere(self) -> bool:
         """After deleting what we were looking at, find somewhere to stand.
 
-        Returning False ends the session, which is the honest outcome when the
-        board is empty -- every other command needs a topic, and pretending to
-        still be on the deleted one would fail in confusing ways later.
+        An empty board is a place you can stand. Ending the session here would
+        mean clearing the board throws you out of the very thing you would use to
+        start again.
         """
         rest = [t for t in self.store.topics() if t["status"] in {"open", "paused"}]
         if rest:
             self._switch(rest[0]["slug"])
             return True
-        self.emit(f"{DIM}the board is empty. Start one with:  "
-                  f"/new <slug> <title>{RESET}")
-        self.emit(f"{DIM}(no topic to stand on, so this session ends){RESET}")
-        return False
+        self.topic, self.topic_id = None, None
+        self.emit(f"{DIM}board is empty — /new <slug> <title> to start one{RESET}")
+        self.on_topic_change()
+        return True
 
     def _switch(self, rest: str) -> None:
         try:
@@ -451,14 +492,22 @@ class Console:
                       f"{DIM}(seats and mode carry over; type the detail after){RESET}")
             return
         slug, title = parts[0], parts[1].strip()
-        here = self.store.topic(self.topic_id)
-        seats = [s["agent"] for s in self.store.seats(self.topic_id)]
-        manager = next((s["agent"] for s in self.store.seats(self.topic_id)
-                        if s["role"] == "manager"), None)
+        if self.topic_id is None:
+            # Nothing to carry over: seat everyone registered, which is what a
+            # first topic on a fresh board almost always wants.
+            seats = [a["name"] for a in self.store.agents() if a["enabled"]]
+            mode, effort, manager = "debate", None, None
+        else:
+            here = self.store.topic(self.topic_id)
+            seats = [s["agent"] for s in self.store.seats(self.topic_id)]
+            mode, effort = here["mode"], here["effort"]
+            manager = next((s["agent"] for s in self.store.seats(self.topic_id)
+                            if s["role"] == "manager"), None)
+        if self.me not in seats:
+            seats.append(self.me)
         try:
             self.store.open_topic(slug, title, title, self.me, seats=seats,
-                                  mode=here["mode"], effort=here["effort"],
-                                  manager=manager)
+                                  mode=mode, effort=effort, manager=manager)
         except StoreError as exc:
             self.emit(f"{RED}{exc}{RESET}")
             return
@@ -470,6 +519,8 @@ class Console:
                   f"then /run.{RESET}")
 
     def _mode(self, rest: str) -> None:
+        if not self._require_topic():
+            return
         if rest not in {"debate", "discuss", "work"}:
             self.emit(f"  mode is {BOLD}{self.store.topic(self.topic_id)['mode']}{RESET}   "
                       f"{DIM}/mode debate|discuss|work{RESET}")
@@ -484,6 +535,8 @@ class Console:
         self.on_topic_change()
 
     def _manager(self, rest: str) -> None:
+        if not self._require_topic():
+            return
         if not self.store.seat(self.topic_id, rest):
             self.emit(f"{RED}{rest!r} holds no seat here{RESET}")
             return
@@ -499,6 +552,8 @@ class Console:
         """Hook for a surface that has to repaint. The REPL has nothing to do."""
 
     def _nudge(self, agent: str) -> None:
+        if not self._require_topic():
+            return
         import asyncio
 
         from .drivers.registry import build_drivers
@@ -531,8 +586,11 @@ class Console:
 
     def run(self) -> int:
         self.emit(BANNER)
-        self.emit(f"{BOLD}{self.topic['title']}{RESET}  {DIM}(`{self.topic['slug']}`, "
-              f"{self.topic['status']}, effort {self.effort()}){RESET}")
+        if self.topic is None:
+            self.emit(f"{DIM}no topic yet — /new <slug> <title> to start one{RESET}")
+        else:
+            self.emit(f"{BOLD}{self.topic['title']}{RESET}  {DIM}(`{self.topic['slug']}`, "
+                      f"{self.topic['status']}, effort {self.effort()}){RESET}")
         self.emit(f"{DIM}you are {self.me}. /run to start, /help for commands.{RESET}")
 
         threading.Thread(target=self._poll, daemon=True).start()

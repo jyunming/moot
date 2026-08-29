@@ -329,10 +329,8 @@ def cmd_console(args) -> int:
     if not topic:
         live = [t for t in board.topics() if t["status"] in {"open", "paused"}
                 and not t["slug"].startswith("doctor-")]
-        if not live:
-            print("no open topics. Start one: agora topic new <slug> --title ... --seats ...")
-            return 1
-        topic = live[0]["slug"]
+        # An empty board opens fine: /new works from inside.
+        topic = live[0]["slug"] if live else None
     board.close()
     return run_console(args.db, topic, who)
 
@@ -346,10 +344,8 @@ def cmd_tui(args) -> int:
     if not topic:
         live = [t for t in board.topics() if t["status"] in {"open", "paused"}
                 and not t["slug"].startswith("doctor-")]
-        if not live:
-            print("no open topics. Start one: agora topic new <slug> --title ... --seats ...")
-            return 1
-        topic = live[0]["slug"]
+        # An empty board opens fine: /new works from inside.
+        topic = live[0]["slug"] if live else None
     board.close()
     return run_tui(args.db, topic, who)
 
