@@ -101,6 +101,10 @@ class SpawnDriver(Driver):
         m = _UUID.search(stdout) or _UUID.search(stderr)
         return m.group(0) if m else None
 
+    def effort_argv(self, seat: Seat) -> list[str]:
+        """This CLI's way of saying "think this hard". Empty when it has no knob."""
+        return ["--effort", seat.effort] if seat.effort else []
+
     def resolve_binary(self) -> str:
         """Full path to the executable, because a bare name is not enough on Windows.
 
@@ -160,6 +164,7 @@ class ClaudeDriver(SpawnDriver):
             "--allowedTools", "mcp__agora",
             "--permission-mode", "manual",
             "--output-format", "json",
+            *self.effort_argv(seat),
         ]
         # Reuse the same session id across turns: first run creates it, later runs
         # resume it. Never --continue, which would race across topics.
@@ -211,7 +216,12 @@ class CodexDriver(SpawnDriver):
         # printed in the plain-text header anyway, so --json bought nothing.
         # `-` means "read the prompt from stdin", which is what makes a multi-line
         # council prompt survive the .CMD shim. See SpawnDriver.prompt_via_stdin.
-        return [self.binary, "exec", "-", "--approve-for-me", *self.extra_argv]
+        return [self.binary, "exec", "-", "--approve-for-me",
+                *self.effort_argv(seat), *self.extra_argv]
+
+    def effort_argv(self, seat: Seat) -> list[str]:
+        # `codex exec` has no --effort; the reasoning level is a config override.
+        return ["-c", f'model_reasoning_effort="{seat.effort}"'] if seat.effort else []
 
     _SESSION_LINE = re.compile(r"session id:\s*([0-9a-f-]{16,})", re.I)
 
@@ -266,6 +276,7 @@ class CopilotDriver(SpawnDriver):
             "--deny-tool", "write",
             "--no-ask-user",              # nothing is watching; never block on a question
             "--no-color",
+            *self.effort_argv(seat),
         ]
         if seat.cli_session:
             argv.append(f"--resume={seat.cli_session}")
@@ -292,6 +303,9 @@ class GeminiDriver(SpawnDriver):
     is registered (`gemini mcp add agora ...`) instead of injecting it here."""
     binary = "gemini"
     stateful = False
+
+    def effort_argv(self, seat: Seat) -> list[str]:
+        return []          # no reasoning-effort knob on this CLI
 
     def argv(self, seat: Seat, prompt: str, session: str | None) -> list[str]:
         import uuid
@@ -329,8 +343,8 @@ class AgyDriver(SpawnDriver):
         # --mode plan is Antigravity's read-only mode: it cannot edit files, which
         # is the right posture for a seat that deliberates. It still calls MCP
         # tools, so the board stays reachable.
-        return [self.binary, "-p", prompt, "--mode", "plan",
-                "--output-format", "json", *self.extra_argv]
+        return [self.binary, "-p", prompt, "--mode", "plan", "--output-format", "json",
+                *self.effort_argv(seat), *self.extra_argv]
 
     def extract_session(self, stdout: str, stderr: str, proposed: str | None) -> str | None:
         m = self._CONV.search(stdout) or self._CONV.search(stderr)

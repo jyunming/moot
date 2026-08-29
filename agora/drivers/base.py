@@ -39,6 +39,12 @@ class Seat:
     kind: str                       # claude|codex|copilot|gemini|...
     cli_session: str | None
     cfg: dict[str, Any] = field(default_factory=dict)
+    #: Reasoning effort for this turn, resolved by the supervisor from the topic
+    #: and the seat. This is the single biggest lever on wall-clock: measured on a
+    #: real 10k-char council prompt, default effort took 279s and `low` took 31.8s
+    #: -- 8.8x, against ~5s of process spawn and MCP handshake. Latency here is
+    #: inference, not transport.
+    effort: str | None = None
 
     @property
     def cwd(self) -> str:

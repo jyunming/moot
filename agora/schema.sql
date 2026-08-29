@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS topics (
     -- build something -- a seat told "disagreement is the product" will
     -- manufacture disagreement to justify its turn.
     mode        TEXT NOT NULL DEFAULT 'debate', -- debate|discuss
+    -- Reasoning effort for this topic's seats, overriding the council default.
+    -- The dominant term in wall-clock: 279s vs 31.8s on the same prompt.
+    effort      TEXT,                           -- low|medium|high, NULL = default
     -- Cost governor. Live debate auto-triggers billed turns on subscription CLIs;
     -- hitting a cap PAUSES for a human, it never silently continues.
     max_rounds  INTEGER NOT NULL DEFAULT 3,

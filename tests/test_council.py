@@ -286,3 +286,59 @@ def test_debate_is_the_default_and_bad_modes_are_refused(board):
     assert board.topic(tid)["mode"] == "debate"
     with pytest.raises(StoreError):
         board.open_topic("x", "T", "B", "human", seats=("claude",), mode="argue")
+
+
+# ------------------------------------------------------------- concurrent rounds
+
+def test_a_concurrent_round_wakes_every_eligible_seat_against_one_board(board):
+    """The latency fix. Round wall-clock becomes max(seat), not sum(seat), and
+    'simultaneous' has to mean every seat saw the same board."""
+    topic = open_debate(board, max_rounds=1)
+    seen: dict[str, str] = {}
+
+    def record(st, seat, prompt):
+        seen.setdefault(seat.agent, prompt)     # the first round is the one under test
+        return f"[{seat.agent}] considered"
+
+    driver = FakeDriver(board, script=record, latency_s=0.05)
+    sup = Supervisor(board, {k: driver for k in ("claude", "codex", "gemini")},
+                     Caps(max_rounds=1))
+    run(sup, topic)
+
+    assert set(seen) == {"claude", "codex", "gemini"}
+    # Nobody saw a peer's message from their own round -- that is what makes the
+    # round safe to run in parallel at all.
+    for agent, prompt in seen.items():
+        for other in set(seen) - {agent}:
+            assert f"[{other}] considered" not in prompt
+
+
+def test_sequential_mode_still_lets_each_seat_see_the_last(board):
+    topic = open_debate(board, max_rounds=3)
+    seen: dict[str, str] = {}
+
+    def record(st, seat, prompt):
+        seen.setdefault(seat.agent, prompt)
+        return f"[{seat.agent}] considered"
+
+    driver = FakeDriver(board, script=record)
+    sup = Supervisor(board, {k: driver for k in ("claude", "codex", "gemini")},
+                     Caps(max_rounds=3), turn_taking="sequential")
+    run(sup, topic)
+
+    later = [p for a, p in seen.items() if "considered" in p]
+    assert later, "in sequential mode a later seat must see an earlier one's post"
+
+
+def test_effort_resolves_topic_over_seat_over_council(board):
+    board.add_agent("claude", "claude", driver="spawn", driver_cfg={"effort": "high"})
+    hot = board.open_topic("hot", "T", "B", "human", seats=("claude",), effort="low")
+    warm = board.open_topic("warm", "T", "B", "human", seats=("claude",))
+    sup = Supervisor(board, {}, Caps(effort="medium"))
+
+    assert sup._effort_for(board.topic(hot), "claude") == "low"     # topic wins
+    assert sup._effort_for(board.topic(warm), "claude") == "high"   # then the seat
+
+    board.add_agent("codex", "codex", driver="spawn")               # no seat effort
+    plain = board.open_topic("plain", "T", "B", "human", seats=("codex",))
+    assert sup._effort_for(board.topic(plain), "codex") == "medium"

@@ -56,6 +56,8 @@ def cmd_agents_add(args) -> int:
     cfg = {"cwd": os.path.abspath(args.cwd)} if args.cwd else {}
     if args.model:
         cfg["model"] = args.model
+    if args.effort:
+        cfg["effort"] = args.effort
     if args.arg:
         # Escape hatch for machine-local quirks -- a broken plugin to switch off,
         # a flag a newer CLI needs. Keeping these per-seat means the drivers stay
@@ -84,7 +86,8 @@ def cmd_topic_new(args) -> int:
     if who not in seats:
         seats.append(who)  # the human always holds a seat on their own topic
     tid = board.open_topic(args.slug, args.title, brief, who, seats=seats,
-                           max_rounds=args.rounds, max_turns=args.turns, mode=args.mode)
+                           max_rounds=args.rounds, max_turns=args.turns, mode=args.mode,
+                           effort=args.effort)
     print(f"topic #{tid} `{args.slug}` opened with seats: {', '.join(seats)}")
     print(f"next: agora run {args.slug}")
     return 0
@@ -208,8 +211,10 @@ def cmd_run(args) -> int:
                 c.execute("UPDATE topics SET max_rounds = max_rounds + ? WHERE id = ?",
                           (args.rounds, int(t["id"])))
 
-    caps = Caps(max_turns_per_seat=args.max_turns, max_wakes_per_agent_per_hour=args.max_wakes)
-    sup = Supervisor(board, _drivers(board), caps)
+    caps = Caps(max_turns_per_seat=args.max_turns, max_wakes_per_agent_per_hour=args.max_wakes,
+                effort=args.effort or "medium")
+    sup = Supervisor(board, _drivers(board), caps,
+                     turn_taking="sequential" if args.sequential else "concurrent")
     reason = asyncio.run(sup.run_topic(int(t["id"])))
     print(f"\n== stopped: {reason}")
     for p in board.proposals(int(t["id"]), status="open"):
@@ -299,6 +304,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cwd", help="repo the agent works in")
     p.add_argument("--model")
     p.add_argument("--driver", choices=["stdio_json", "acp", "spawn", "none"])
+    p.add_argument("--effort", choices=["low", "medium", "high"],
+                   help="reasoning effort for this seat; the dominant latency knob")
     p.add_argument("--arg", action="append",
                    help="extra argv passed to this CLI every wake (repeatable)")
     p.set_defaults(fn=cmd_agents_add)
@@ -312,6 +319,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seats", required=True, help="comma-separated agent names")
     p.add_argument("--rounds", type=int, default=3)
     p.add_argument("--turns", type=int, default=6, help="per-seat turn ceiling")
+    p.add_argument("--effort", choices=["low", "medium", "high"],
+                   help="override seat effort for this topic (low is ~9x faster)")
     p.add_argument("--mode", choices=["debate", "discuss"], default="debate",
                    help="debate: find the flaw (default). discuss: build on each other")
     p.set_defaults(fn=cmd_topic_new)
@@ -360,6 +369,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-turns", type=int, default=6, dest="max_turns")
     p.add_argument("--max-wakes", type=int, default=30, dest="max_wakes",
                    help="per agent per hour; a failed wake still counts")
+    p.add_argument("--effort", choices=["low", "medium", "high"],
+                   help="council-wide effort for this run (default medium)")
+    p.add_argument("--sequential", action="store_true",
+                   help="one seat at a time so each sees the last; slower by ~N x")
     p.set_defaults(fn=cmd_run)
 
     p = sub.add_parser("nudge", help="wake one seat by hand")

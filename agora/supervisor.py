@@ -61,6 +61,12 @@ class Caps:
     max_rounds: int = 3
     max_turns_per_seat: int = 6
     max_wakes_per_agent_per_hour: int = 30
+    #: Reasoning effort for every seat unless the topic or the seat overrides it.
+    #: `medium` is the default because the endpoints were measured: on a real
+    #: council prompt `low` ran 8.8x faster than default effort, but the argument
+    #: quality is the thing being traded away. Use `low` for routine rounds,
+    #: `high` when the ruling turns on catching a flaw.
+    effort: str = "medium"
     #: Consecutive silent turns across all seats that mean the debate is spent.
     quiet_rounds_to_settle: int = 1
 
@@ -71,11 +77,14 @@ class Supervisor:
         store: Store,
         drivers: dict[str, Driver],
         caps: Caps | None = None,
+        turn_taking: str = "concurrent",
     ) -> None:
         #: keyed by agent *kind* (claude/codex/...), or by agent name for overrides
         self.drivers = drivers
         self.store = store
         self.caps = caps or Caps()
+        #: concurrent | sequential -- see run_topic.
+        self.turn_taking = turn_taking
 
     # ------------------------------------------------------------------ driving
 
@@ -94,25 +103,69 @@ class Supervisor:
                 self._park(topic_id, reason)
                 return reason
 
-            speaker = self._next_speaker(topic_id)
-            if speaker is None:
-                # Everyone in this round has spoken. Advance, or settle.
-                topic = self.store.topic(topic_id)
-                if topic["round"] + 1 >= topic["max_rounds"]:
-                    self._park(topic_id, "rounds exhausted -- needs a human to extend or rule")
-                    return "rounds_exhausted"
-                with self.store.tx() as c:
-                    c.execute("UPDATE topics SET round = round + 1 WHERE id = ?", (topic_id,))
-                self.store.post(
-                    topic_id, "agora",
-                    f"--- round {topic['round'] + 2} of {topic['max_rounds']} ---",
-                    kind="system", count_turn=False,
+            speakers = self._eligible(topic_id)
+            if speakers and self.turn_taking == "concurrent":
+                # Everyone answers the same board state at once, then reacts to
+                # each other next round. Round wall-clock becomes max(seat) rather
+                # than sum(seat) -- the only structural latency win available,
+                # since spawn is ~2% of a turn and the rest is inference.
+                #
+                # One shared cursor for the whole round is what "simultaneous"
+                # means: every prompt is built against the same head, and every
+                # seat that succeeds advances to it. Nobody sees a peer's message
+                # from this round, which also removes first-speaker anchoring.
+                #
+                # A proposal opened mid-round does not abort turns already in
+                # flight; they finish, and _blocking_reason catches it at the top
+                # of the next iteration. Per-seat caps bound the overrun.
+                head = self.store.head()
+                await asyncio.gather(
+                    *(self.wake_seat(topic_id, a, head=head) for a in speakers),
+                    return_exceptions=True,
                 )
+                # A concurrent round IS a round. Without this the counter only
+                # advanced in the "nobody left to speak" branch, which concurrency
+                # never reaches while seats still have peers to react to -- so
+                # max_rounds was silently unenforced and only per-seat caps stopped
+                # the loop.
+                if not self._advance_round(topic_id):
+                    return "rounds_exhausted"
+                continue
+
+            speaker = speakers[0] if speakers else None
+            if speaker is None:
+                # Everyone has spoken and nobody has anything new. Advance, or settle.
+                if not self._advance_round(topic_id):
+                    return "rounds_exhausted"
                 continue
 
             await self.wake_seat(topic_id, speaker)
 
-    async def wake_seat(self, topic_id: int, agent: str) -> WakeResult:
+    def _advance_round(self, topic_id: int) -> bool:
+        """Tick the round counter. False means the topic is out of rounds."""
+        topic = self.store.topic(topic_id)
+        if topic["round"] + 1 >= topic["max_rounds"]:
+            self._park(topic_id, "rounds exhausted -- needs a human to extend or rule")
+            return False
+        with self.store.tx() as c:
+            c.execute("UPDATE topics SET round = round + 1 WHERE id = ?", (topic_id,))
+        self.store.post(
+            topic_id, "agora",
+            f"--- round {topic['round'] + 2} of {topic['max_rounds']} ---",
+            kind="system", count_turn=False,
+        )
+        return True
+
+    def _effort_for(self, topic, agent: str) -> str | None:
+        """Topic override beats seat default beats council default."""
+        cfg = json.loads(self.store.agent(agent)["driver_cfg"])
+        try:
+            topic_effort = topic["effort"]
+        except (IndexError, KeyError):
+            topic_effort = None
+        return topic_effort or cfg.get("effort") or self.caps.effort
+
+    async def wake_seat(self, topic_id: int, agent: str, *, head: int | None = None) -> WakeResult:
         row = self.store.seat(topic_id, agent)
         if row is None:
             raise ValueError(f"{agent} holds no seat on topic {topic_id}")
@@ -131,8 +184,9 @@ class Supervisor:
             kind=meta["kind"],
             cli_session=row["cli_session"],
             cfg=json.loads(meta["driver_cfg"]),
+            effort=self._effort_for(topic, agent),
         )
-        prompt, cursor = self.build_prompt(topic_id, agent)
+        prompt, cursor = self.build_prompt(topic_id, agent, head=head)
 
         self.store.set_seat_state(topic_id, agent, "waking")
         wake_id = self.store.record_wake(topic_id, agent)
@@ -190,42 +244,46 @@ class Supervisor:
                     return f"proposal #{p['id']} ({p['title']!r}) awaits a human decision"
         return None
 
-    def _next_speaker(self, topic_id: int) -> str | None:
-        """Round-robin among seats that still have something to say and budget to say it.
+    def _eligible(self, topic_id: int) -> list[str]:
+        """Every seat that has something to react to and budget to react with.
 
-        A seat speaks this round if it has unread events. That is what makes the
-        loop terminate naturally: once nobody has anything new to react to, the
-        round yields no speakers and the topic settles.
+        A seat qualifies when its cursor is behind the board, which is what makes
+        the loop terminate on its own: once everyone is caught up, the round
+        yields nobody and the topic settles. Directed asks come first -- in
+        sequential mode that is a real queue jump, and in concurrent mode it only
+        orders the list, since everyone runs together anyway.
         """
         head = self.store.head()
         seats = {s["agent"]: s for s in self.store.seats(topic_id)}
 
-        # Directed asks jump the queue. Someone said "@codex, what about X?" and
-        # waiting for codex's turn in the rotation is not what either of them
-        # meant. Caps still apply -- a mention buys priority, not extra budget.
+        def can_speak(s) -> bool:
+            if s["kind"] in {"human", "external"} or not s["enabled"]:
+                return False        # humans answer on their own schedule
+            if s["turns_used"] >= min(s["max_turns"], self.caps.max_turns_per_seat):
+                self.store.set_seat_state(topic_id, s["agent"], "capped")
+                return False
+            if self.store.wakes_in_last_hour(s["agent"]) >= self.caps.max_wakes_per_agent_per_hour:
+                self.store.set_seat_state(topic_id, s["agent"], "capped")
+                return False
+            return True
+
+        ordered: list[str] = []
+        # A mention buys priority, not budget: a capped seat is still not woken.
         for m in self.store.open_mentions(topic_id):
             s = seats.get(m["target"])
-            if s is None or s["kind"] in {"human", "external"} or not s["enabled"]:
-                continue                       # humans answer in their own time
-            if s["turns_used"] >= min(s["max_turns"], self.caps.max_turns_per_seat):
-                continue
-            if self.store.wakes_in_last_hour(s["agent"]) >= self.caps.max_wakes_per_agent_per_hour:
-                continue
-            return s["agent"]
+            if s is not None and s["agent"] not in ordered and can_speak(s):
+                ordered.append(s["agent"])
 
         for s in seats.values():
-            if s["kind"] in {"human", "external"} or not s["enabled"]:
+            if s["agent"] in ordered or s["last_seen"] >= head:
                 continue
-            if s["last_seen"] >= head:
-                continue                                  # nothing new for them
-            if s["turns_used"] >= min(s["max_turns"], self.caps.max_turns_per_seat):
-                self.store.set_seat_state(topic_id, s["agent"], "capped")
-                continue
-            if self.store.wakes_in_last_hour(s["agent"]) >= self.caps.max_wakes_per_agent_per_hour:
-                self.store.set_seat_state(topic_id, s["agent"], "capped")
-                continue
-            return s["agent"]
-        return None
+            if can_speak(s):
+                ordered.append(s["agent"])
+        return ordered
+
+    def _next_speaker(self, topic_id: int) -> str | None:
+        eligible = self._eligible(topic_id)
+        return eligible[0] if eligible else None
 
     def _park(self, topic_id: int, reason: str) -> None:
         topic = self.store.topic(topic_id)
@@ -235,7 +293,7 @@ class Supervisor:
 
     # ----------------------------------------------------------------- prompting
 
-    def build_prompt(self, topic_id: int, agent: str) -> tuple[str, int]:
+    def build_prompt(self, topic_id: int, agent: str, head: int | None = None) -> tuple[str, int]:
         """What the agent is told when woken, plus the cursor that covers it.
 
         The cursor is returned rather than committed, because it may only be
@@ -245,9 +303,11 @@ class Supervisor:
         topic = self.store.topic(topic_id)
         row = self.store.seat(topic_id, agent)
         cursor = row["last_seen"] if row else 0
-        head = self.store.head()
+        # A caller driving a concurrent round passes one shared head so every seat
+        # in the round sees the same board.
+        head = self.store.head() if head is None else head
 
-        new = self.store.events_since(cursor, topic_id, limit=200)
+        new = self.store.events_since(cursor, topic_id, limit=200, until=head)
         msg_ids = [e.payload.get("message_id") for e in new if e.kind == "message"]
         msgs = [m for m in self.store.transcript(topic_id) if m["id"] in set(filter(None, msg_ids))]
 
@@ -298,7 +358,9 @@ class Supervisor:
         else:
             lines += ["## Since you last spoke", "", "_Nothing new -- you are opening._", ""]
 
-        open_props = self.store.proposals(topic_id, status="open")
+        # Bounded by the same head, for the same reason as the events above.
+        open_props = [p for p in self.store.proposals(topic_id, status="open")
+                      if self.store.proposal_event_id(p["id"]) <= head]
         if open_props:
             lines.append("## Open proposals")
             lines.append("")

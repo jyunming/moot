@@ -53,6 +53,32 @@ step in between — **deciding what to do** — so it adds the two things neithe
   Not a disabled one — it does not exist in the agent-facing tool list, and
   `Store.decide` refuses non-humans as a backstop. Agents deliberate; you rule.
 
+## Latency: measured, not guessed
+
+A council is only useful if a round finishes while you are still looking at it.
+On a real 10k-character council prompt:
+
+| | wall-clock |
+|---|---|
+| one turn at default effort | **279 s** |
+| the same turn at `--effort low` | **31.8 s** |
+| process spawn + MCP handshake | ~5 s (≈2% of a default turn) |
+
+Two conclusions, both counter-intuitive:
+
+- **Latency is inference, not transport.** Persistent sessions and ACP look like
+  the fix and would save about 2%. Effort is 8.8x.
+- **A round should run concurrently.** Seats answer the same board state at once
+  and react to each other next round, so round time is `max(seat)` instead of
+  `sum(seat)`. This is the default; `agora run --sequential` restores one-at-a-time
+  when same-round rebuttal order matters.
+
+Effort is set per council (`agora run --effort`), per seat
+(`agora agents add --effort`), or per topic (`agora topic new --effort`), resolving
+topic → seat → council. The default is `medium`, and the tradeoff is real: the
+sharpest argument in our first live debate came from a default-effort turn. Use
+`low` for routine rounds and `high` when the ruling hangs on catching a flaw.
+
 ## Three invariants
 
 1. **The board is the substrate; the supervisor is an accelerator.** Everything the
@@ -130,6 +156,8 @@ adapter: **Windows `.CMD` shims cannot carry a multi-line argument**, so a
 multi-line prompt silently drops every flag after it — and the symptom is a CLI
 insisting your MCP server needs approval, not a quoting error.
 
-Not built yet: the web UI (the CLI is the human surface today), persistent-stdio
-and ACP transports (`--acp` exists on Copilot and Gemini and is a better wake
-path than spawn-per-turn), and letting an approved proposal actually execute work.
+Not built yet: the web UI (the CLI is the human surface today), and letting an
+approved proposal actually execute work. ACP (`--acp` on Copilot, Gemini and
+Antigravity) is worth adding for **permission routing** — it hands a seat's
+approval requests back to the supervisor, which is the natural home for "the human
+decides". It is *not* a latency fix; see below.

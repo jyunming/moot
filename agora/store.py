@@ -102,7 +102,15 @@ class Store:
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
         """IMMEDIATE so a write-intent transaction takes the write lock up front,
-        rather than upgrading mid-transaction and hitting SQLITE_BUSY on a peer."""
+        rather than upgrading mid-transaction and hitting SQLITE_BUSY on a peer.
+
+        **Never `await` inside a `tx()` block.** The supervisor runs a whole round
+        of seats concurrently on one event loop sharing this connection, and it is
+        only safe because every transaction opens and closes synchronously -- no
+        coroutine can suspend mid-transaction and let another interleave. That is a
+        rule, not an accident: an await in here would corrupt the board under
+        concurrency, and the failure would be rare and non-deterministic.
+        """
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             yield self._conn
@@ -122,7 +130,8 @@ class Store:
         self._conn.executescript(SCHEMA.read_text(encoding="utf-8"))
         # CREATE TABLE IF NOT EXISTS cannot add a column to a board that already
         # exists, so new columns are migrated explicitly. Cheap and idempotent.
-        for table, column, ddl in (("topics", "mode", "TEXT NOT NULL DEFAULT 'debate'"),):
+        for table, column, ddl in (("topics", "mode", "TEXT NOT NULL DEFAULT 'debate'"),
+                                   ("topics", "effort", "TEXT")):
             cols = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
             if column not in cols:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
@@ -143,13 +152,20 @@ class Store:
         )
         return int(cur.lastrowid)
 
-    def events_since(self, cursor: int, topic_id: int | None = None, limit: int = 200) -> list[Event]:
+    def events_since(self, cursor: int, topic_id: int | None = None, limit: int = 200,
+                     until: int | None = None) -> list[Event]:
+        """Events in (cursor, until]. The upper bound is what makes a concurrent
+        round actually simultaneous: without it, a seat whose prompt is built a
+        moment later sees a peer's message from the same round, and the seats are
+        no longer answering the same board."""
+        ceiling = until if until is not None else 2**62
         if topic_id is None:
-            rows = self.q("SELECT * FROM events WHERE id > ? ORDER BY id LIMIT ?", (cursor, limit))
+            rows = self.q("SELECT * FROM events WHERE id > ? AND id <= ? ORDER BY id LIMIT ?",
+                          (cursor, ceiling, limit))
         else:
             rows = self.q(
-                "SELECT * FROM events WHERE id > ? AND topic_id = ? ORDER BY id LIMIT ?",
-                (cursor, topic_id, limit),
+                "SELECT * FROM events WHERE id > ? AND id <= ? AND topic_id = ? ORDER BY id LIMIT ?",
+                (cursor, ceiling, topic_id, limit),
             )
         return [
             Event(r["id"], r["topic_id"], r["kind"], r["actor"], json.loads(r["payload"]), r["created_at"])
@@ -211,14 +227,15 @@ class Store:
         max_rounds: int = 3,
         max_turns: int = 6,
         mode: str = "debate",
+        effort: str | None = None,
     ) -> int:
         if mode not in TOPIC_MODES:
             raise StoreError(f"unknown mode {mode!r}; expected one of {sorted(TOPIC_MODES)}")
         with self.tx() as c:
             cur = c.execute(
-                """INSERT INTO topics (slug, title, brief, opened_by, max_rounds, mode)
-                   VALUES (?,?,?,?,?,?)""",
-                (slug, title, brief, opened_by, max_rounds, mode),
+                """INSERT INTO topics (slug, title, brief, opened_by, max_rounds, mode, effort)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (slug, title, brief, opened_by, max_rounds, mode, effort),
             )
             topic_id = int(cur.lastrowid)
             for agent in seats:
