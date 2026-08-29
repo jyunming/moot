@@ -69,6 +69,18 @@ class SpawnDriver(Driver):
     #: argv[0]; overridable for testing or for a non-PATH install.
     binary: str = ""
 
+    #: Deliver the prompt on stdin instead of as an argv element.
+    #:
+    #: This is not a stylistic choice. Three of these CLIs install as Windows
+    #: `.CMD` batch shims, and cmd.exe cannot carry an argument containing
+    #: newlines -- the prompt breaks apart at the first line ending and every
+    #: flag after it is swallowed. The visible symptom is not a parse error: it
+    #: is codex reporting `approval: never` (because `--approve-for-me` never
+    #: arrived) and refusing every MCP call, which reads exactly like a
+    #: misconfigured server. Council prompts are always multi-line markdown, so
+    #: any adapter whose CLI can read a prompt from stdin should.
+    prompt_via_stdin: bool = False
+
     def __init__(self, db: Path | str, *, timeout_s: float = 300.0, extra_argv: list[str] | None = None):
         self.db = str(db)
         self.timeout_s = timeout_s
@@ -107,9 +119,11 @@ class SpawnDriver(Driver):
         proposed = session or (self.new_session(seat) if self.stateful else None)
         argv = self.argv(seat, prompt, proposed)
         argv[0] = self.resolve_binary()
+        stdin = prompt if self.prompt_via_stdin else None
 
         try:
-            code, out, err = await self._run(argv, cwd=seat.cwd, timeout=self.timeout_s)
+            code, out, err = await self._run(argv, cwd=seat.cwd, stdin=stdin,
+                                             timeout=self.timeout_s)
         except asyncio.TimeoutError:
             return WakeResult.failure(f"{self.binary} exceeded {self.timeout_s}s")
         except FileNotFoundError:
@@ -160,7 +174,17 @@ class CodexDriver(SpawnDriver):
     """`codex exec` for the first turn, `codex exec resume <id>` after. Codex
     assigns the session id, so it is captured from output and persisted."""
     binary = "codex"
-    stateful = True
+    prompt_via_stdin = True
+    #: Stateless, and the two facts force each other. The prompt must arrive on
+    #: stdin (multi-line markdown cannot survive the .CMD shim as argv), but
+    #: `codex exec resume <id> <PROMPT>` will not accept `-` in its prompt
+    #: position -- it demands a literal positional. Resume and stdin are therefore
+    #: mutually exclusive, and stdin is the one that is not optional.
+    #:
+    #: No loss worth fighting for: the board is the shared memory, so a fresh
+    #: session rebuilds context from the record every turn and cannot drift from
+    #: it. See the module docstring.
+    stateful = False
 
     def argv(self, seat: Seat, prompt: str, session: str | None) -> list[str]:
         # No `-c mcp_servers...` injection here, and two reasons why not, both
@@ -173,13 +197,28 @@ class CodexDriver(SpawnDriver):
         #      by `-c` is not launched. It must exist in the config file.
         # Both failures look identical from outside: a clean exit that posts
         # nothing. So codex is registered once via `agora install` instead.
-        if seat.cli_session:
-            return [self.binary, "exec", "resume", seat.cli_session, prompt,
-                    "--json", *self.extra_argv]
-        return [self.binary, "exec", prompt, "--json", *self.extra_argv]
+        # --approve-for-me is what makes an MCP tool call actually execute. Without
+        # it `codex exec` runs with approval policy "never", which does not mean
+        # "auto-approve" -- it means *refuse*: the call is dispatched, the server
+        # runs it, and codex reports "MCP tool call requires approval, but approval
+        # policy is never". From outside that is indistinguishable from the server
+        # not being loaded at all, which is the wrong thing to go and debug.
+        # It is mutually exclusive with --sandbox, so the read-only posture for a
+        # deliberation seat comes from the prompt and the tool set, not a flag.
+        # No --json: it silently defeats --approve-for-me. With both flags the
+        # approval policy reverts to "never" and every MCP call is refused again,
+        # with the same misleading "requires approval" message. The session id is
+        # printed in the plain-text header anyway, so --json bought nothing.
+        # `-` means "read the prompt from stdin", which is what makes a multi-line
+        # council prompt survive the .CMD shim. See SpawnDriver.prompt_via_stdin.
+        return [self.binary, "exec", "-", "--approve-for-me", *self.extra_argv]
+
+    _SESSION_LINE = re.compile(r"session id:\s*([0-9a-f-]{16,})", re.I)
 
     def extract_session(self, stdout: str, stderr: str, proposed: str | None) -> str | None:
-        # --json emits a stream of events; the session id appears in the first.
+        m = self._SESSION_LINE.search(stdout) or self._SESSION_LINE.search(stderr)
+        if m:
+            return m.group(1)
         for line in stdout.splitlines():
             line = line.strip()
             if not line.startswith("{"):
@@ -267,9 +306,43 @@ class GeminiDriver(SpawnDriver):
         ]
 
 
+# --------------------------------------------------------------------- Antigravity
+
+class AgyDriver(SpawnDriver):
+    """Antigravity's CLI (`agy`). Resumes by id via `--conversation <ID>`.
+
+    `--mode plan` is a real read-only mode, which makes it one of the two seats
+    (with Gemini) that cannot edit files even if it decided to. Like Gemini it has
+    no per-run MCP injection, so it is registered once by `agora install`.
+    """
+    binary = "agy"
+    #: Stateless by measurement, not by limitation. `--conversation <id>` resumes
+    #: correctly, but a resumed council seat carries its whole history forward: a
+    #: probe conversation reached 132k input tokens and one resumed turn took 800
+    #: seconds, against 13 for a fresh one. Since the board already holds the
+    #: shared memory, resuming buys nothing here and costs a timeout.
+    stateful = False
+
+    _CONV = re.compile(r'"conversation_id"\s*:\s*"([^"]+)"')
+
+    def argv(self, seat: Seat, prompt: str, session: str | None) -> list[str]:
+        # --mode plan is Antigravity's read-only mode: it cannot edit files, which
+        # is the right posture for a seat that deliberates. It still calls MCP
+        # tools, so the board stays reachable.
+        return [self.binary, "-p", prompt, "--mode", "plan",
+                "--output-format", "json", *self.extra_argv]
+
+    def extract_session(self, stdout: str, stderr: str, proposed: str | None) -> str | None:
+        m = self._CONV.search(stdout) or self._CONV.search(stderr)
+        if m:
+            return m.group(1)
+        return super().extract_session(stdout, stderr, proposed)
+
+
 DRIVER_CLASSES = {
     "claude": ClaudeDriver,
     "codex": CodexDriver,
     "copilot": CopilotDriver,
     "gemini": GeminiDriver,
+    "agy": AgyDriver,
 }

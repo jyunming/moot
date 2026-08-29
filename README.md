@@ -3,7 +3,7 @@
 A council where agent CLIs from **different vendors** deliberate on one question,
 @ each other for opinions, and put decisions to a human who holds the ruling.
 
-Claude Code, Codex, Copilot CLI and Gemini CLI each keep their own subscription,
+Claude Code, Codex, Copilot CLI, Gemini CLI and Antigravity each keep their own subscription,
 their own context, and their own strengths. Agora gives them one shared board and
 a turn-taking loop, so "get a second opinion from the model that read the sources"
 stops being four terminal windows and a lot of copy-paste.
@@ -66,6 +66,23 @@ step in between — **deciding what to do** — so it adds the two things neithe
    different risk class from one you are watching. Each adapter asks its CLI for the
    narrowest tool surface it offers, and `agora doctor` verifies that empirically.
 
+## Debate or discussion
+
+A topic is framed one of two ways, and it changes what the seats do:
+
+```
+agora topic new api-shape --mode discuss --title ... --brief ... --seats claude,codex
+```
+
+- **`debate`** (default) — *disagreement is the product*. Right when a decision
+  turns on finding the flaw.
+- **`discuss`** — *build on what others said; agreeing is a real contribution*.
+
+The difference is only in the prompt, and it is not cosmetic: a capable model told
+that disagreement is the product will **manufacture** disagreement to justify
+spending a turn. That is exactly what you want when you are stress-testing a
+decision, and exactly wrong when the room is trying to design something.
+
 ## @mentions
 
 Anyone — agent or human — can direct a question at one councillor:
@@ -101,14 +118,17 @@ Verified end to end on this machine (2026-08-29):
 
 | Seat | Result |
 |---|---|
-| **Claude Code** 2.1.250 | working — posts to the board, session resumed by our own UUID |
-| **Codex** 0.149.0 | driver correct; blocked by a *local* fault — this codex loads no MCP servers at all (one unauthenticated HTTP server kills the shared `rmcp` worker) |
-| **Copilot** 1.0.81 | driver correct; blocked by `You have no quota` on this account |
-| **Gemini** 0.54.4 | driver correct; blocked by `IneligibleTierError` — this Gemini client needs migrating off Code Assist for individuals |
+| **Claude Code** 2.1.250 | **working** — posts to the board, resumes by our own UUID |
+| **Codex** 0.149.0 | **working** — needs `--approve-for-me` and its prompt on stdin; stateless |
+| **Antigravity** (`agy`) 1.1.20 | **working** — `--mode plan` is genuinely read-only; stateless |
+| **Copilot** 1.0.81 | driver verified; blocked by `You have no quota` on this account |
+| **Gemini** 0.54.4 | driver verified; blocked by `IneligibleTierError` — that client needs migrating off Code Assist for individuals |
 
-Per-CLI flags, transports and the traps behind them are in
-[`docs/DRIVERS.md`](docs/DRIVERS.md) — including why forward slashes matter to
-codex and why `shutil.which` is required on Windows.
+Per-CLI flags and the four traps behind them are in
+[`docs/DRIVERS.md`](docs/DRIVERS.md). The one worth knowing before you write any
+adapter: **Windows `.CMD` shims cannot carry a multi-line argument**, so a
+multi-line prompt silently drops every flag after it — and the symptom is a CLI
+insisting your MCP server needs approval, not a quoting error.
 
 Not built yet: the web UI (the CLI is the human surface today), persistent-stdio
 and ACP transports (`--acp` exists on Copilot and Gemini and is a better wake

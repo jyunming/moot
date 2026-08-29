@@ -23,15 +23,14 @@ from .store import Store
 
 PROBE_TOKEN = "AGORA-PROBE-OK"
 
-PROBE_PROMPT = f"""You are running an installation self-test for the Agora council platform.
+PROBE_PROMPT = f"""Call the `agora_say` tool with topic="{{slug}}" and body="{{token}}". Do only that.
 
-Do exactly one thing, then stop:
+The tool is served by an MCP server named `agora` (or `agora-<seat>`). It may be
+namespaced (`agora-codex/agora_say`, `mcp__agora__agora_say`) and may be deferred
+until searched for -- find it and call it.
 
-    call the `agora_say` tool with topic="{{slug}}" and body="{{token}}"
-
-Do not explain, do not read anything, do not edit any file. One tool call.
-If you cannot see an `agora_say` tool, reply with the single line
-NO-AGORA-TOOLS and stop -- that result is useful, so do not work around it.
+Call no other tool. Do not read files, run commands, or explore. If the
+`agora_say` call itself fails, reply NO-AGORA-TOOLS and the error it gave.
 """
 
 

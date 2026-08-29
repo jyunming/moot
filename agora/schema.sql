@@ -29,6 +29,11 @@ CREATE TABLE IF NOT EXISTS topics (
     title       TEXT NOT NULL,
     brief       TEXT NOT NULL DEFAULT '',   -- the question put to the council
     status      TEXT NOT NULL DEFAULT 'open',   -- open|paused|resolved|aborted
+    -- What kind of conversation this is. Adversarial framing is right when a
+    -- decision turns on finding the flaw, and wrong when the room is trying to
+    -- build something -- a seat told "disagreement is the product" will
+    -- manufacture disagreement to justify its turn.
+    mode        TEXT NOT NULL DEFAULT 'debate', -- debate|discuss
     -- Cost governor. Live debate auto-triggers billed turns on subscription CLIs;
     -- hitting a cap PAUSES for a human, it never silently continues.
     max_rounds  INTEGER NOT NULL DEFAULT 3,

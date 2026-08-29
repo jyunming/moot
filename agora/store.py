@@ -33,6 +33,11 @@ HUMAN_KINDS = frozenset({"human"})
 
 DRIVER_KINDS = frozenset({"stdio_json", "acp", "spawn", "none"})
 
+#: How a topic is framed to its seats. `debate` asks them to find the flaw;
+#: `discuss` asks them to build. The difference is entirely in the prompt, and
+#: it matters: a seat told disagreement is the product will invent some.
+TOPIC_MODES = frozenset({"debate", "discuss"})
+
 #: `@name` in a message body. Restricted to seats on the topic; see
 #: Store._record_mentions for why an unseated name stays plain text.
 MENTION_RE = re.compile(r"@([A-Za-z0-9_][A-Za-z0-9_-]*)")
@@ -115,6 +120,12 @@ class Store:
 
     def init_schema(self) -> None:
         self._conn.executescript(SCHEMA.read_text(encoding="utf-8"))
+        # CREATE TABLE IF NOT EXISTS cannot add a column to a board that already
+        # exists, so new columns are migrated explicitly. Cheap and idempotent.
+        for table, column, ddl in (("topics", "mode", "TEXT NOT NULL DEFAULT 'debate'"),):
+            cols = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+            if column not in cols:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     # ------------------------------------------------------------------- events
 
@@ -199,12 +210,15 @@ class Store:
         seats: Iterable[str] = (),
         max_rounds: int = 3,
         max_turns: int = 6,
+        mode: str = "debate",
     ) -> int:
+        if mode not in TOPIC_MODES:
+            raise StoreError(f"unknown mode {mode!r}; expected one of {sorted(TOPIC_MODES)}")
         with self.tx() as c:
             cur = c.execute(
-                """INSERT INTO topics (slug, title, brief, opened_by, max_rounds)
-                   VALUES (?,?,?,?,?)""",
-                (slug, title, brief, opened_by, max_rounds),
+                """INSERT INTO topics (slug, title, brief, opened_by, max_rounds, mode)
+                   VALUES (?,?,?,?,?,?)""",
+                (slug, title, brief, opened_by, max_rounds, mode),
             )
             topic_id = int(cur.lastrowid)
             for agent in seats:

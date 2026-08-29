@@ -259,3 +259,30 @@ def test_mention_grants_priority_not_extra_budget(board):
 
     sup = Supervisor(board, {}, Caps(max_turns_per_seat=1))
     assert sup._next_speaker(topic) != "gemini", "capped seat woken by a mention"
+
+
+# ---------------------------------------------------------------- topic modes
+
+def test_debate_and_discuss_frame_the_room_differently(board):
+    """The only difference between the modes is what the seat is told -- but a
+    seat told 'disagreement is the product' will manufacture some, so it matters."""
+    fight = board.open_topic("f", "T", "B", "human", seats=("claude",), mode="debate")
+    build = board.open_topic("b", "T", "B", "human", seats=("claude",), mode="discuss")
+    sup = Supervisor(board, {})
+
+    debate_prompt, _ = sup.build_prompt(fight, "claude")
+    discuss_prompt, _ = sup.build_prompt(build, "claude")
+
+    assert "Disagreement is the product" in debate_prompt
+    assert "Disagreement is the product" not in discuss_prompt
+    assert "not manufacture an objection" in discuss_prompt
+    # Everything else about the two prompts is the same machinery.
+    for p in (debate_prompt, discuss_prompt):
+        assert "agora_propose" in p and "a human holds every decision" in p
+
+
+def test_debate_is_the_default_and_bad_modes_are_refused(board):
+    tid = board.open_topic("d", "T", "B", "human", seats=("claude",))
+    assert board.topic(tid)["mode"] == "debate"
+    with pytest.raises(StoreError):
+        board.open_topic("x", "T", "B", "human", seats=("claude",), mode="argue")

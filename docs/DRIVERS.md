@@ -1,44 +1,95 @@
 # Agent CLI driver matrix — verified, not from docs
 
-Every row below was read from `--help` on **this machine**, 2026-08-29. Versions matter;
-re-run `python -m agora.doctor` after any CLI upgrade rather than trusting this file.
+Every row was read from `--help` and then **confirmed by a live probe that checked
+what landed on the board**. Versions matter; re-run `agora doctor` after any CLI
+upgrade rather than trusting this file.
 
-| CLI | version | headless | resume | caller-set session id | per-run MCP injection |
-|---|---|---|---|---|---|
-| Claude Code | 2.1.250 | `-p/--print` | `--resume <id>` / `-c` / `--fork-session` | **`--session-id <uuid>`** | `--mcp-config <files\|json>` |
-| Codex CLI | 0.149.0 | `codex exec [PROMPT]` | `codex exec resume <id\|--last> [PROMPT]` | no (server assigns) | `-c mcp_servers.<n>...` |
-| Copilot CLI | 1.0.81 | `-p/--prompt` **+ `--allow-all-tools`** | `--continue` / `--connect[=id]` | `-n/--name` (name, not id) | `--additional-mcp-config <json\|@file>` |
-| Gemini CLI | 0.54.4 | `-p/--prompt` | `-r/--resume <latest\|N>` | **`--session-id <uuid>`** | `gemini mcp add` / settings.json |
+| CLI | version | headless | resume by id | prompt via | per-run MCP injection | read-only mode |
+|---|---|---|---|---|---|---|
+| Claude Code | 2.1.250 | `-p/--print` | `--session-id`/`--resume` (our UUID) | argv | `--mcp-config` + `--strict-mcp-config` | `--allowedTools` allowlist |
+| Codex | 0.149.0 | `codex exec` | yes, but see below | **stdin (`-`)** | no — `agora install` | — |
+| Copilot | 1.0.81 | `-p` + `--allow-all-tools` | `-r/--resume=<id>` | argv | `--additional-mcp-config` | `--deny-tool` |
+| Gemini | 0.54.4 | `-p` | no (index/`latest` only) | argv | no — `agora install` | `--approval-mode plan` |
+| Antigravity | agy 1.1.20 | `-p/--print` | `--conversation <id>` | argv | no — `agora install` | `--mode plan` |
 
-## The finding that shapes the architecture
+## Four traps, each of which looks like something else
 
-**No single transport drives all four.** Anyone claiming otherwise has not run the binaries.
-Three distinct styles, so: one `Driver` ABC, four adapters, and the supervisor never
-learns which style it is talking to.
+These cost real time to find. Every one presents as a *different* problem than it is.
 
-| Style | Who | Mechanism | Latency per turn |
-|---|---|---|---|
-| **Persistent stdio (stream-json)** | Claude | `--print --input-format stream-json --output-format stream-json --session-id <uuid>` — long-lived process, write a turn to stdin, read events off stdout. `--replay-user-messages` and `--include-partial-messages` available. | lowest |
-| **ACP** (Agent Client Protocol) | Copilot, Gemini | `--acp` — JSON-RPC session where the *supervisor is the client*. Permission requests and agent questions route **back to us**, which is exactly the human-decision hook. | low |
-| **Spawn-per-turn** | Codex | `codex exec resume <session_id> "<msg>"`. Process dies each turn; state lives in the session. Also has `app-server` (experimental JSON-RPC) and `codex queue` — evaluate later, do not depend on experimental in v0. | highest (cold start) |
+### 1. Windows `.CMD` shims cannot carry a multi-line argument
 
-Codex has **no `--acp`**. Do not design around ACP as if it were universal.
+`codex` and `gemini` install as npm batch shims. `shutil.which` resolves
+`codex.CMD`, and `CreateProcess` runs a `.CMD` through cmd.exe — which **cannot
+pass an argument containing newlines**. The prompt breaks at the first line ending
+and *every flag after it disappears*.
 
-## Consequences for the supervisor
+Council prompts are always multi-line markdown, so this is not an edge case; it is
+the normal case. And the symptom is not a quoting error:
 
-1. **`Driver` interface is the abstraction**: `start(session) -> handle`, `send(handle, text) -> AsyncIterator[Event]`, `close(handle)`. Spawn-per-turn adapters fake persistence by storing the session id and re-spawning; the supervisor cannot tell.
-2. **Session ids are ours where possible.** Claude and Gemini accept a caller-supplied UUID — generate it, store it in `sessions`, and resume is deterministic. Codex and Copilot hand back their own identifier, so capture it from first-run output and persist it. Never use `--last` / `--continue` in the supervisor: it races when two topics drive the same CLI.
-3. **Non-interactive requires permission pre-grants**, and they differ per CLI:
-   `claude --permission-mode`, `copilot --allow-all-tools` (mandatory for `-p`), `gemini --yolo` / `--approval-mode`, `codex` sandbox config. Each is a blast-radius decision — keep them in one config block, never scattered through the adapters.
-4. **MCP injection is per-run for Claude and Copilot** (`--mcp-config`, `--additional-mcp-config`), which means an agent can be handed the Agora tools *without* mutating that CLI's global config. Prefer this. Gemini needs settings.json, so it is the one that requires a persistent install step.
+```
+codex exec "<multi-line prompt>" --approve-for-me
+  → header prints  approval: never          (the flag never arrived)
+  → MCP tool call requires approval, but approval policy is never
+```
 
-## Unverified — measure before relying on
+That reads as "the MCP server is misconfigured", and sends you to debug
+`config.toml`, `-c` syntax, and plugins — none of which are involved. **Test: the
+same call with a single-line prompt works.** Fix: send the prompt on stdin.
 
-- **Tool-call timeout per CLI.** Decides whether a blocking `wait_for_event` long-poll is
-  usable, or whether every wake must go through the supervisor. Measure with a deliberately
-  slow tool; do not guess.
-- **Codex `app-server`** as a persistent driver. Marked experimental.
-- **Antigravity** (`~/.antigravity` and `%APPDATA%/Antigravity` both exist here) is an IDE,
-  not a CLI. It can consume MCP servers, so it can *participate* in a council as a
-  human-driven seat — but it cannot be *woken* by the supervisor. Treat it as a
-  poll-on-turn participant, never as a driver.
+### 2. `codex exec` defaults to refusing every MCP call
+
+Its default approval policy is `never`, which does **not** mean "don't ask, just
+run it". It means *refuse*. The server is loaded, the tool is dispatched, and the
+call is denied. `--approve-for-me` is required, and it is mutually exclusive with
+`--sandbox`.
+
+### 3. `--json` silently defeats `--approve-for-me`
+
+With both flags the policy reverts to `never` and every MCP call fails again, same
+misleading message. Codex prints its session id in the plain-text header anyway.
+
+### 4. Codex defers MCP tools out of the initial tool list
+
+`tool_search_always_defer_mcp_tools` is on. Ask codex to "list the tools containing
+agora" and it answers **NONE** while being perfectly able to call them. So
+*"can you see it?"* is not a valid health check — only *"call it, and did it land?"*
+is. `agora doctor`'s probe prompt says so explicitly, because an earlier version of
+it offered "reply NO-AGORA-TOOLS if you can't see the tool" and codex, truthfully,
+took that exit every time.
+
+Related noise: a `github` MCP server that is **Not logged in** prints
+`rmcp worker quit with fatal: ... AuthRequired` on every codex start. It is
+alarming and irrelevant — other servers load fine alongside it.
+
+## Session continuity is optional, and two seats decline it
+
+Claude resumes cleanly by a UUID we choose. The others each have a reason not to:
+
+- **Codex** — resume and stdin are mutually exclusive. `codex exec resume <id>`
+  demands a literal positional prompt and will not take `-`. Since multi-line
+  prompts *must* go through stdin (trap 1), resume loses.
+- **Antigravity** — `--conversation <id>` works, but a resumed seat carries its
+  whole history: a probe conversation reached 132k input tokens, and one resumed
+  turn took **800 seconds** against 13 for a fresh one.
+- **Gemini** — `--resume` takes `latest` or an index, not the UUID `--session-id`
+  accepts, and "latest" races when one CLI holds two seats.
+
+This costs nothing, because **the board is the shared memory**. A stateless seat
+rebuilds context from the record each turn and cannot drift from what was actually
+said. `stateful = False` is a supported mode, not a degraded one.
+
+## Blast radius
+
+v0 seats deliberate; they do not edit files. Each adapter asks its CLI for the
+narrowest surface it offers, and they are not equally strong — Claude's
+`--strict-mcp-config` plus an allowlist is tightest; Gemini's and Antigravity's
+`plan` modes are genuinely read-only; Copilot must be given `--allow-all-tools`
+for `-p` at all, so it is narrowed by denial instead. `agora doctor` verifies
+reachability empirically rather than trusting that a flag did what its name says.
+
+## Machine-local quirks belong in the seat, not the driver
+
+`agora agents add <name> <kind> --arg=... ` appends argv to every wake for that
+seat. Use it for one machine's problems — a broken plugin to switch off, a flag a
+newer build needs — so the adapters stay general instead of accumulating one
+person's environment.

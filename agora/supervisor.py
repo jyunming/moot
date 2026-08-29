@@ -27,6 +27,27 @@ from .store import Store
 
 log = logging.getLogger("agora.supervisor")
 
+#: How the room is framed to a seat. This is the whole difference between the two
+#: topic modes, and it is a real one: told that disagreement is the product, a
+#: capable model will manufacture disagreement rather than spend a turn agreeing.
+#: That is what you want when a decision hangs on finding the flaw, and actively
+#: harmful when the room is trying to build something.
+FRAMING = {
+    "debate": (
+        "**This is a debate.** Disagreement is the product. Spend your turns on "
+        "objections that would change the outcome, and say what specifically would "
+        "have to be true for you to withdraw one. If you agree, say so in a "
+        "sentence and stop -- do not restate the argument in your own words."
+    ),
+    "discuss": (
+        "**This is a working discussion, not a debate.** Build on what others have "
+        "said: add what is missing, supply the evidence someone asked for, sharpen a "
+        "half-formed idea. Agreeing is a real contribution and needs no apology -- do "
+        "not manufacture an objection to justify your turn. Disagree only where you "
+        "actually do, and then say it plainly."
+    ),
+}
+
 
 @dataclass(frozen=True)
 class Caps:
@@ -244,7 +265,9 @@ class Supervisor:
             topic["brief"],
             "",
             f"**Council:** {seats}",
-            f"**Your budget:** {turns_left} turn(s) left. Spend them on disagreement that changes the outcome.",
+            f"**Your budget:** {turns_left} turn(s) left.",
+            "",
+            FRAMING[topic["mode"]],
             "",
         ]
 
@@ -294,6 +317,7 @@ class Supervisor:
             "- `agora_read(topic)` — full transcript, if the excerpt above is not enough.",
             "- `agora_say(topic, body)` — argue, add evidence, or disagree. One point, made well.",
             "- `agora_propose(topic, title, body)` — a concrete decision you want taken.",
+            "- `agora_ask(topic, agent, question)` — put a question to one councillor by name.",
             "- `agora_vote(proposal_id, stance, rationale)` — `support` / `object` / `abstain`.",
             "- `agora_pass(topic, why)` — nothing to add. Passing is a real answer; say so and stop.",
             "",

@@ -56,6 +56,11 @@ def cmd_agents_add(args) -> int:
     cfg = {"cwd": os.path.abspath(args.cwd)} if args.cwd else {}
     if args.model:
         cfg["model"] = args.model
+    if args.arg:
+        # Escape hatch for machine-local quirks -- a broken plugin to switch off,
+        # a flag a newer CLI needs. Keeping these per-seat means the drivers stay
+        # general instead of accumulating one user's environment.
+        cfg["extra_argv"] = args.arg
     board.add_agent(args.name, args.kind, driver=args.driver, driver_cfg=cfg)
     print(f"seat {args.name} ({args.kind}, driver={board.agent(args.name)['driver']})")
     return 0
@@ -79,7 +84,7 @@ def cmd_topic_new(args) -> int:
     if who not in seats:
         seats.append(who)  # the human always holds a seat on their own topic
     tid = board.open_topic(args.slug, args.title, brief, who, seats=seats,
-                           max_rounds=args.rounds, max_turns=args.turns)
+                           max_rounds=args.rounds, max_turns=args.turns, mode=args.mode)
     print(f"topic #{tid} `{args.slug}` opened with seats: {', '.join(seats)}")
     print(f"next: agora run {args.slug}")
     return 0
@@ -290,10 +295,12 @@ def build_parser() -> argparse.ArgumentParser:
     ag = sub.add_parser("agents", help="manage seats").add_subparsers(dest="sub", required=True)
     p = ag.add_parser("add")
     p.add_argument("name")
-    p.add_argument("kind", choices=["claude", "codex", "copilot", "gemini", "human", "external"])
+    p.add_argument("kind", choices=["claude", "codex", "copilot", "gemini", "agy", "human", "external"])
     p.add_argument("--cwd", help="repo the agent works in")
     p.add_argument("--model")
     p.add_argument("--driver", choices=["stdio_json", "acp", "spawn", "none"])
+    p.add_argument("--arg", action="append",
+                   help="extra argv passed to this CLI every wake (repeatable)")
     p.set_defaults(fn=cmd_agents_add)
     ag.add_parser("ls").set_defaults(fn=cmd_agents_ls)
 
@@ -305,6 +312,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seats", required=True, help="comma-separated agent names")
     p.add_argument("--rounds", type=int, default=3)
     p.add_argument("--turns", type=int, default=6, help="per-seat turn ceiling")
+    p.add_argument("--mode", choices=["debate", "discuss"], default="debate",
+                   help="debate: find the flaw (default). discuss: build on each other")
     p.set_defaults(fn=cmd_topic_new)
 
     p = sub.add_parser("ls", help="list topics")

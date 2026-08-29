@@ -25,7 +25,7 @@ from .store import Store
 
 #: Claude and Copilot are absent on purpose -- injecting per-run is strictly
 #: better, and registering them globally would be a side effect nobody asked for.
-NEEDS_REGISTRATION = {"codex", "gemini"}
+NEEDS_REGISTRATION = {"codex", "gemini", "agy"}
 
 
 def server_argv(agent: str, db: Path | str) -> list[str]:
@@ -42,6 +42,8 @@ def install_cmd(kind: str, agent: str, db: Path | str) -> list[str] | None:
     if kind == "gemini":
         return ["gemini", "mcp", "add", name, *argv,
                 "--scope", "user", "--trust", "--description", f"Agora council seat {agent}"]
+    if kind == "agy":
+        return ["agy", "mcp", "add", name, *argv]
     return None
 
 
@@ -68,8 +70,6 @@ def install_seat(store: Store, agent: str, *, dry_run: bool = False) -> tuple[bo
 
 def uninstall_cmd(kind: str, agent: str) -> list[str] | None:
     name = f"agora-{agent}"
-    if kind == "codex":
-        return ["codex", "mcp", "remove", name]
-    if kind == "gemini":
-        return ["gemini", "mcp", "remove", name]
+    if kind in {"codex", "gemini", "agy"}:
+        return [kind, "mcp", "remove", name]
     return None
