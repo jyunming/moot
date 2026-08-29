@@ -6,9 +6,9 @@
 
 <p align="center">
   <a href="#install">Install</a> ·
-  <a href="docs/COMMANDS.md">Commands</a> ·
-  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
-  <a href="docs/DRIVERS.md">Driver notes</a>
+  <a href="COMMANDS.md">Commands</a> ·
+  <a href="ARCHITECTURE.md">Architecture</a> ·
+  <a href="DRIVERS.md">Driver notes</a>
 </p>
 
 ---
@@ -111,7 +111,7 @@ Then the same topic can become a team: `/mode work <seat>` and a manager drafts
 tasks, the plan comes to you as one proposal, and approved work runs in isolated
 git worktrees.
 
-**[Using it →](docs/USING.md)**  ·  **[Every command →](docs/COMMANDS.md)**
+**[Using it →](USING.md)**  ·  **[Every command →](COMMANDS.md)**
 
 ## Status
 
@@ -126,7 +126,7 @@ Verified end to end on this machine (2026-08-29):
 | **Gemini** 0.54.4 | driver verified; blocked by `IneligibleTierError` — that client needs migrating off Code Assist for individuals |
 
 Per-CLI flags and the four traps behind them are in
-[`docs/DRIVERS.md`](docs/DRIVERS.md). The one worth knowing before you write any
+[`DRIVERS.md`](DRIVERS.md). The one worth knowing before you write any
 adapter: **Windows `.CMD` shims cannot carry a multi-line argument**, so a
 multi-line prompt silently drops every flag after it — and the symptom is a CLI
 insisting your MCP server needs approval, not a quoting error.
@@ -138,11 +138,11 @@ a latency fix: process spawn is ~2% of a turn.
 
 ## More
 
-- **[Using it](docs/USING.md)** — the session, mentions, minutes, work mode
-- **[Commands](docs/COMMANDS.md)** — every command, in both surfaces
-- **[Why it works this way](docs/WHY.md)** — invariants, latency measurements, prior art
-- **[Architecture](docs/ARCHITECTURE.md)** — the board, the fences, the driver contract
-- **[Driver notes](docs/DRIVERS.md)** — what each CLI actually does, and four traps
-- **[Contributing](CONTRIBUTING.md)**
+- **[Using it](USING.md)** — the session, mentions, minutes, work mode
+- **[Commands](COMMANDS.md)** — every command, in both surfaces
+- **[Why it works this way](WHY.md)** — invariants, latency measurements, prior art
+- **[Architecture](ARCHITECTURE.md)** — the board, the fences, the driver contract
+- **[Driver notes](DRIVERS.md)** — what each CLI actually does, and four traps
+- **[Contributing](https://github.com/jyunming/moot/blob/main/CONTRIBUTING.md)**
 
 MIT.
