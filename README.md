@@ -56,18 +56,48 @@ so use Windows Terminal, PowerShell or cmd for the full thing.
 
 `agora watch <topic>` is the read-only tail, for a second terminal.
 
-## What makes it different from a message bus
+## Prior art — read this before adding to it
 
-There are good agent message buses already (agent-bus, MACP, tmux-bridge) and good
-parallel-work orchestrators (Vibe Kanban, Claude Squad, Conductor). Buses move
-messages; orchestrators fan out worktrees and show you diffs. Agora is for the
-step in between — **deciding what to do** — so it adds the two things neither has:
+An earlier version of this file claimed that message buses move messages,
+orchestrators fan out worktrees, and neither does structured deliberation with a
+human arbiter. **That was wrong.** A proper survey found the space is crowded and
+several projects are ahead of this one:
 
-- **Structured deliberation.** Proposals, objections, advisory votes, and a ruling,
-  as a schema rather than as a chat convention.
-- **A human who is the arbiter, not a reviewer.** There is no `agora_decide` tool.
-  Not a disabled one — it does not exist in the agent-facing tool list, and
-  `Store.decide` refuses non-humans as a backstop. Agents deliberate; you rule.
+- **[LoopTroop](https://github.com/looptroop-ai/LoopTroop)** (MIT, ~1.3k commits) —
+  the closest by far. Its *LLM Council* has independent models draft plans, score
+  each other on a weighted rubric and **vote on proposals**; the winner synthesises
+  the losing drafts; **a human approves before execution**; then "beads" execute in
+  isolated git worktrees with Ralph-style retry. That is this project's meeting
+  mode, plan gate and work mode, already built, with rubric scoring on top.
+- **[Concord MCP](https://github.com/Get-Concord-AI/concord-mcp)** (MIT, TS) —
+  architecturally near-identical to Agora's core: an MCP server over local SQLite
+  in `.concord/`, several vendor CLIs attached to one store, durable agent-to-agent
+  threads, and a full-screen dashboard. It has **file-claim overlap detection**,
+  which Agora does not. It has no deliberation, votes, manager role or human gate.
+- **[OpenCode agent teams](https://dev.to/uenyioha/porting-claude-codes-agent-teams-to-opencode-4hol)** —
+  append-only JSONL inbox, **session injection** (messages delivered as synthetic
+  user turns) and **auto-wake** that restarts a recipient's prompt loop on delivery.
+  That is a better wake design than Agora's 1s polling.
+- **[Omnigent](https://github.com/omnigent-ai/omnigent)** — wraps each agent in
+  `bwrap`/seatbelt. An OS-level sandbox is the correct fix for the containment
+  problem Agora currently works around by pointing a seat at an empty directory.
+- **[Wit](https://github.com/amaar-mc/wit)** — symbol-level locks via Tree-sitter,
+  finer-grained than worktree-per-task.
+- **[CLITrigger](https://github.com/HyperAITeam/CLITrigger)**, **[Multica](https://github.com/multica-ai/multica)**,
+  **[Paseo](https://github.com/getpaseo/paseo)**, **[ORCH](https://github.com/oxgeneral/ORCH)**,
+  **[Agent Teams AI](https://github.com/777genius/agent-teams-ai)** — parallel vendor-CLI
+  runners with approval gates, debate modes and Kanban control planes.
+  The [awesome-cli-coding-agents](https://github.com/bradAGI/awesome-cli-coding-agents)
+  index lists dozens more.
+
+**What is arguably still distinctive here**, stated narrowly: the human-only
+decision is a *structural* property rather than a UI gate — there is no
+`agora_decide` tool for an agent to call, and `Store.decide` is the only path out
+of `draft`. And seats participate through their own vendor CLI and subscription,
+so routing work by cost is possible.
+
+That is a thin margin. Anyone picking this up should trial LoopTroop and Concord
+first and only continue here if that margin matters to them.
 
 ## Latency: measured, not guessed
 
