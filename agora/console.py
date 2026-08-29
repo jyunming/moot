@@ -288,8 +288,12 @@ class Console:
             return
         with self.store.tx() as c:
             c.execute("UPDATE topics SET effort = ? WHERE id = ?", (rest, self.topic_id))
-        print(f"{DIM}council effort → {rest}"
-              f"{' (applies from the next /run)' if self.driving.is_set() else ''}{RESET}")
+        # Takes effect on the next wake even mid-run: the supervisor captures Caps
+        # once, but wake_seat re-reads the topic row every time and topic effort
+        # outranks the council default. A concurrent round's wakes all start
+        # together, so the change lands on the round after the current one.
+        when = " — from the next round" if self.driving.is_set() else ""
+        print(f"{DIM}council effort → {rest}{when}{RESET}")
 
     def _asks(self, _: str) -> None:
         asks = self.pending_asks()

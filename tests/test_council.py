@@ -403,3 +403,26 @@ def test_a_system_note_quoting_a_question_does_not_ask_again(board):
                kind="system", count_turn=False)
 
     assert len(board.open_mentions(topic, "human")) == 1, "system note created a phantom ask"
+
+
+def test_retuning_effort_mid_run_reaches_the_next_wake(board):
+    """The brainstorming dial has to work *while* the council runs: go wide and
+    cheap, then turn it up on the branch worth thinking about. The supervisor
+    captures Caps once at start, so this only works because wake_seat re-reads the
+    topic row each time -- assert the effort the driver actually received."""
+    topic = open_debate(board, max_rounds=9)
+    got: list[str | None] = []
+
+    def record(st, seat, prompt):
+        got.append(seat.effort)
+        return f"[{seat.agent}] noted"
+
+    driver = FakeDriver(board, script=record)
+    sup = Supervisor(board, {"claude": driver}, Caps(effort="low"))
+
+    asyncio.run(sup.wake_seat(topic, "claude"))
+    with board.tx() as c:                       # what /effort high does
+        c.execute("UPDATE topics SET effort = 'high' WHERE id = ?", (topic,))
+    asyncio.run(sup.wake_seat(topic, "claude"))
+
+    assert got == ["low", "high"], f"mid-run retune did not reach the driver: {got}"
