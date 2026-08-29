@@ -239,6 +239,37 @@ def cmd_prompt(args) -> int:
     return 0
 
 
+def cmd_console(args) -> int:
+    """One terminal where every agent's reply lands and you can talk back."""
+    from .console import run_console
+    board = _board(args)
+    who = _human(board, args.as_)
+    topic = args.topic
+    if not topic:
+        live = [t for t in board.topics() if t["status"] in {"open", "paused"}
+                and not t["slug"].startswith("doctor-")]
+        if not live:
+            print("no open topics. Start one: agora topic new <slug> --title ... --seats ...")
+            return 1
+        topic = live[0]["slug"]
+    board.close()
+    return run_console(args.db, topic, who)
+
+
+def cmd_watch(args) -> int:
+    """Read-only tail, for a second terminal beside the one driving."""
+    from .console import Console
+    board = _board(args)
+    who = _human(board, args.as_)
+    board.close()
+    c = Console(args.db, args.topic, who)
+    try:
+        c._poll()
+    except KeyboardInterrupt:
+        c.stop.set()
+    return 0
+
+
 def cmd_doctor(args) -> int:
     from .doctor import run_doctor
     return asyncio.run(run_doctor(_board(args), only=args.only, timeout=args.timeout))
@@ -332,6 +363,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("topic")
     p.add_argument("agent")
     p.set_defaults(fn=cmd_prompt)
+
+    p = sub.add_parser("console", help="live council view: watch replies and talk back")
+    p.add_argument("topic", nargs="?", help="default: the most recent open topic")
+    p.set_defaults(fn=cmd_console)
+
+    p = sub.add_parser("watch", help="read-only live tail of a topic")
+    p.add_argument("topic")
+    p.set_defaults(fn=cmd_watch)
 
     p = sub.add_parser("doctor", help="smoke-test each CLI driver end to end")
     p.add_argument("--only", help="comma-separated agent names")

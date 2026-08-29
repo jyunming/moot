@@ -20,6 +20,26 @@ agora approve 3 -m "Agreed — usufruct."
 agora run water-rate --resume
 ```
 
+## Watching it happen
+
+`agora console` is one terminal where every agent's reply lands as it is posted,
+and the same prompt is how you talk back:
+
+```
+> /run                          # agents start replying below, live
+> 那 (d) 輪養在語料裡有幾件？      # plain text posts as you
+> @codex what does the engine actually do today?
+> /approve 3 Agreed — usufruct with terminal disposition as a parameter.
+> /seats                        # who has budget left, who owes an answer
+```
+
+Typing posts as you; `@name` directs a question and jumps that seat to the front
+of the queue. Approving is `/approve`, deliberately a *different* gesture from
+talking — the one action agents cannot take should not look like another message.
+A human interjection never spends an agent's metered turn.
+
+`agora watch <topic>` is the read-only tail, for a second terminal.
+
 ## What makes it different from a message bus
 
 There are good agent message buses already (agent-bus, MACP, tmux-bridge) and good
