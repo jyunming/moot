@@ -882,8 +882,15 @@ class Supervisor:
         msg_ids = [e.payload.get("message_id") for e in new if e.kind == "message"]
         msgs = self.store.messages_by_id(msg_ids)
 
+        # Naming the chair matters more than it looks: an outstanding question to
+        # a person stops the council until they answer, and a seat that could not
+        # tell one person from another put the room on hold waiting for whoever
+        # it happened to pick.
+        seated_chair = self.store.chair(topic_id)
         seats = ", ".join(
-            f"{s['agent']} ({s['kind']}, {s['turns_used']}/{min(s['max_turns'], self.caps.max_turns_per_seat)} turns)"
+            f"{s['agent']} ({s['kind']}"
+            f"{', chair' if s['agent'] == seated_chair else ''}, "
+            f"{s['turns_used']}/{min(s['max_turns'], self.caps.max_turns_per_seat)} turns)"
             for s in self.store.seats(topic_id)
         )
         turns_left = min(row["max_turns"], self.caps.max_turns_per_seat) - row["turns_used"]
@@ -991,6 +998,11 @@ class Supervisor:
             "- `mooting_say(topic, body)` — argue, add evidence, or disagree. One point, briefly.",
             "- `mooting_propose(topic, title, body)` — a concrete decision you want taken.",
             "- `mooting_ask(topic, agent, question)` — put a question to one councillor by name.",
+            *([f"  Anything needing a decision or a steer goes to **{seated_chair}**, "
+               f"who chairs this meeting. Ask another person only about something "
+               f"they said themselves — a question to a person stops the council "
+               f"until they answer, so do not put the room on hold to ask somebody "
+               f"who has not spoken."] if seated_chair else []),
             *(["- `mooting_assign(topic, agent, title, body, acceptance)` — draft a task (manager only).",
                "- `mooting_tasks(topic)` — the current plan and its state.",
                "- `mooting_task_update(task_id, status, result)` — `accepted` / `rejected` on finished work."]

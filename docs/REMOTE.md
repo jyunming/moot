@@ -130,6 +130,14 @@ Leave it running. It prints a one-time pairing code:
 
 It replies with the seat you speak as and this chat's id.
 
+**In a group, turn Group Privacy off first.** Telegram gives a new bot privacy
+mode by default, and a bot in that mode receives only commands and replies to
+its own messages. Every command still works, and plain talk — which is how you
+post to the council — never reaches it, silently. In @BotFather: `/mybots` →
+your bot → *Bot Settings* → *Group Privacy* → *Turn off*, then remove the bot
+from the group and add it again, because the setting is read when it joins. A
+one-to-one chat with the bot is unaffected.
+
 **5. Lock it to that room.** Stop the bot, start it again with the id — no
 token, it is remembered:
 
