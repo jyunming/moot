@@ -1457,3 +1457,50 @@ def test_nothing_is_stripped_before_the_name_is_known():
     from mooting.telegram import addressed_here
 
     assert addressed_here("/seats@any_bot", None) == "/seats"
+
+
+# ------------------------------------------------------- answers, not typing
+#
+# Typing on a phone is the cost this surface exists to avoid. A command whose
+# answers are a short fixed list should offer them rather than ask.
+
+
+def test_a_bare_command_asks_for_its_chooser():
+    from mooting.telegram import wants_choices
+
+    for command, which in (("/effort", "effort"), ("/rounds", "rounds"),
+                           ("/nudge", "nudge"), ("/chair", "chair"),
+                           ("/EFFORT", "effort")):
+        assert wants_choices(command) == which, command
+
+
+def test_a_command_that_already_has_its_answer_is_left_alone():
+    from mooting.telegram import wants_choices
+
+    for command in ("/effort high", "/rounds 5", "/nudge Santa", "/topics", "talk"):
+        assert wants_choices(command) is None, command
+
+
+def test_a_choice_carries_what_it_sets():
+    from mooting.telegram import parse_set, set_callback
+
+    for what, value in (("effort", "low"), ("rounds", "3"), ("chair", "Jeremy"),
+                        ("wake", "Santa")):
+        data = set_callback(what, value)
+        assert parse_set(data) == (what, value)
+        assert len(data.encode("utf-8")) <= 64
+
+    assert parse_set("pick:3") is None
+    assert parse_set("set:bogus:x") is None, "an unknown setting is not ours"
+    assert parse_set("set:effort:") is None, "an empty value is not a choice"
+
+
+def test_the_standing_keyboard_is_the_things_done_most_often():
+    """Two rows of three: more squeezes the chat off a phone screen."""
+    from mooting.telegram import DESK
+
+    assert len(DESK) == 2 and all(len(row) == 3 for row in DESK)
+    flat = [b for row in DESK for b in row]
+    assert flat == sorted(set(flat), key=flat.index), "a button appears twice"
+    for label in flat:
+        assert label.startswith("/"), label

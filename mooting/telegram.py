@@ -334,6 +334,23 @@ MENU = [
     ("help", "all of the above, with examples"),
 ]
 
+#: Always above the keyboard, so the things done most often are one tap and
+#: never a menu. Two rows of three: more than that and the chat is squeezed off
+#: a phone screen, which costs more than it saves.
+DESK = (("/run", "/stop", "/proposals"),
+        ("/topics", "/seats", "/usage"))
+
+
+def desk_keyboard():
+    """The standing set of actions, as a keyboard that does not go away."""
+    from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=label) for label in row] for row in DESK],
+        resize_keyboard=True, is_persistent=True,
+        input_field_placeholder="say something to the council")
+
+
 #: Deliberately absent from the menu, though both still work when typed.
 #: `reset` clears every topic on the board and must not be one tap from a thumb
 #: — it has already been run by accident here. `capability` hands a seat the
@@ -508,6 +525,39 @@ def parse_join(data: str) -> tuple[str, int] | None:
     return parts[1], int(parts[2])
 
 
+#: A value a person picks rather than types. `low`, `3`, a seat's name -- short
+#: enough that the 64-byte callback is never in question.
+SET_PREFIX = "set"
+
+
+def set_callback(what: str, value: str) -> str:
+    data = f"{SET_PREFIX}:{what}:{value}"
+    if len(data.encode("utf-8")) > 64:
+        raise ValueError("callback_data over Telegram's 64-byte limit")
+    return data
+
+
+def parse_set(data: str) -> tuple[str, str] | None:
+    """`(what, value)` behind a picker button, or None if this is not one."""
+    parts = (data or "").split(":", 2)
+    if len(parts) != 3 or parts[0] != SET_PREFIX:
+        return None
+    if parts[1] not in {"effort", "rounds", "chair", "wake"} or not parts[2]:
+        return None
+    return parts[1], parts[2]
+
+
+#: Bare commands that should offer their answers instead of asking for typing.
+#: The verb alone is the question; the buttons are the answer.
+def wants_choices(text: str) -> str | None:
+    """Which chooser a bare command is asking for, if any."""
+    import re as _re
+
+    m = _re.fullmatch(r"/(effort|rounds|nudge|chair)(?:@\S+)?", (text or "").strip(),
+                      _re.I)
+    return m.group(1).lower() if m else None
+
+
 def rule_callback(action: str, pid: int) -> str:
     if action not in {"ok", "no", "full"}:
         raise ValueError(f"unknown ruling action {action!r}")
@@ -619,7 +669,7 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
     from aiogram.filters import Command
     from aiogram.types import Message
 
-    from .store import NotAuthorised, StoreError, connect
+    from .store import HUMAN_KINDS, NotAuthorised, StoreError, connect
 
     try:
         bot = Bot(token=bot_token)
@@ -738,7 +788,8 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             return
         if store.seat_for_chat(msg.chat.id, msg.from_user.id):
             return await bot.send_message(msg.chat.id, HELP,
-                                          parse_mode=ParseMode.HTML)
+                                          parse_mode=ParseMode.HTML,
+                                          reply_markup=desk_keyboard())
         # Not paired, so everything in HELP is unreachable and listing it is
         # noise. Say the one thing that is possible from here.
         if claim["code"]:
@@ -777,9 +828,11 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                 store.pair_approve(pid, got, got)
                 store.bind_identity(got, msg.from_user.id)
                 store.claim_room(store.ensure_room("telegram", str(msg.chat.id)), got)
+                await bot.send_message(
+                    msg.chat.id, "Paired.", reply_markup=desk_keyboard())
                 return await say(
                     msg.chat.id,
-                    f"Paired. You speak as **{got}** and host this room."
+                    f"You speak as **{got}** and host this room."
                     f"\n\nThis chat is `{msg.chat.id}` — pass "
                     f"`--chat {msg.chat.id}` when starting the bot to keep it to "
                     f"this room only.")
@@ -1202,6 +1255,43 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             await say(chat_id, f"{who} asks to join. `/pair approve {handle}` to "
                                f"let them in.")
 
+    async def send_choices(chat_id, which: str, slug: str | None) -> None:
+        """The answers to a bare command, as buttons.
+
+        Typing on a phone is the cost this whole surface exists to avoid, and a
+        command whose answers are a short fixed list should never ask for them.
+        """
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+        rows, head = [], ""
+        if which == "effort":
+            head = "How long should they think?"
+            rows = [[InlineKeyboardButton(text=e, callback_data=set_callback("effort", e))
+                     for e in ("low", "medium", "high")]]
+        elif which == "rounds":
+            head = "How many more rounds?"
+            rows = [[InlineKeyboardButton(text=f"+{n}",
+                                          callback_data=set_callback("rounds", str(n)))
+                     for n in (1, 3, 5)]]
+        elif which in {"nudge", "chair"}:
+            if not slug:
+                return await say(chat_id, "No topic here yet.")
+            seats = store.seats(int(store.topic(slug)["id"]))
+            want_people = which == "chair"
+            names = [r["agent"] for r in seats
+                     if (r["kind"] in HUMAN_KINDS) == want_people]
+            if not names:
+                return await say(chat_id, "Nobody here to choose from.")
+            head = ("Who chairs this meeting?" if want_people
+                    else "Which seat should wake?")
+            rows = [[InlineKeyboardButton(text=n, callback_data=set_callback(which, n))]
+                    for n in names]
+        try:
+            await bot.send_message(chat_id, head,
+                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        except Exception as exc:
+            log.warning("chooser %s failed: %s", which, exc)
+
     async def send_picker(chat_id, *, message_id: int | None = None) -> None:
         """The topic list, as one button per row.
 
@@ -1281,6 +1371,25 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             return await say(chat_id,
                              f"{row['display'] or row['user_id']} now speaks as "
                              f"**{row['seat']}**, let in by {presser}.")
+
+        chosen = parse_set(call.data or "")
+        if chosen is not None:
+            what, value = chosen
+            if not allowed(chat_id):
+                return await call.answer("not this chat", show_alert=True)
+            seat = store.seat_for_chat(chat_id, call.from_user.id)
+            if not seat:
+                return await call.answer("You are not paired here.", show_alert=True)
+            slug = topic_here(chat_id)
+            line = {"effort": f"/effort {value}", "rounds": f"/rounds {value}",
+                    "chair": f"/topic chair {value}", "wake": f"/nudge {value}"}[what]
+            board = ChatBoard(db, slug, seat, room=("telegram", str(chat_id)))
+            try:
+                out = board.handle(line)
+            finally:
+                board.close()
+            await call.answer(value)
+            return await say(chat_id, out or f"{what} → {value}")
 
         picked = parse_pick(call.data or "")
         if picked is not None:
@@ -1381,6 +1490,9 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
         # else they could be. That is a list to tap, not a slug to retype.
         if wants_picker(line):
             return await send_picker(msg.chat.id)
+        chooser = wants_choices(line)
+        if chooser:
+            return await send_choices(msg.chat.id, chooser, topic_here(msg.chat.id))
         # Ask for a proposal by number and it comes back with its buttons,
         # whenever it was opened.
         want = proposal_ref(line)
