@@ -1054,3 +1054,63 @@ def test_a_pending_request_does_not_make_somebody_known(board):
     """Asking is not being approved, in any room."""
     board.pair_request("-100999", "555", "A Stranger")
     assert board.seat_for_user("555") is None
+
+
+def test_a_request_carries_a_handle_that_cannot_be_guessed(board):
+    """`1`, `2`, `3` invited `/pair approve 4` for a request nobody had seen."""
+    pid = board.pair_request("-100111", "42", "Someone")
+    row = board.pairing("-100111", "42")
+
+    assert row["ref"] and row["ref"] != str(pid)
+    assert len(row["ref"]) >= 6
+    second = board.pairing(
+        "-100111", "43") if board.pair_request("-100111", "43", "Other") else None
+    assert second["ref"] != row["ref"], "two requests share a handle"
+
+
+def test_one_room_cannot_answer_another_rooms_request(board):
+    """The hole the numbers invited: approving is a decision about who joins
+    *this* council, and nothing checked which room the request came from."""
+    board.pair_request("-100222", "77", "A Stranger")
+    theirs = board.pairing("-100222", "77")
+
+    # Reachable from the room it belongs to.
+    assert board.pairing_by_ref(theirs["ref"], chat_id="-100222") is not None
+    # And nowhere else.
+    assert board.pairing_by_ref(theirs["ref"], chat_id="-100111") is None
+    assert board.pairing_by_ref(str(theirs["id"]), chat_id="-100111") is None
+
+
+def test_listing_requests_shows_only_this_room(board):
+    """Listing every room's pending requests told whoever asked that other rooms
+    exist and who is trying to get into them."""
+    board.pair_request("-100111", "1", "Mine")
+    board.pair_request("-100222", "2", "Theirs")
+
+    here = board.pairings("pending", chat_id="-100111")
+    assert [r["display"] for r in here] == ["Mine"]
+    assert len(board.pairings("pending")) == 2, "the board still sees both"
+
+
+def test_handles_are_backfilled_onto_a_board_that_predates_them(board, tmp_path):
+    """An existing board has rows with no handle, and they must stay answerable."""
+    import sqlite3
+
+    from mooting.store import connect
+
+    board.pair_request("-100111", "42", "Someone")
+    path = board.path
+    board.close()
+
+    raw = sqlite3.connect(path)
+    raw.execute("UPDATE pairings SET ref = NULL")
+    raw.commit()
+    raw.close()
+
+    again = connect(path)                       # opening migrates
+    try:
+        row = again.pairing("-100111", "42")
+        assert row["ref"], "an older request was left with no handle"
+        assert again.pairing_by_ref(row["ref"], chat_id="-100111") is not None
+    finally:
+        again.close()

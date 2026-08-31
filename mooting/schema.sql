@@ -224,6 +224,10 @@ CREATE TABLE IF NOT EXISTS pairings (
     chat_id     TEXT NOT NULL,              -- the room; allowlisted separately
     user_id     TEXT NOT NULL,              -- the person
     display     TEXT NOT NULL DEFAULT '',   -- what they call themselves there
+    -- What a person types to answer this. A small integer invites `/pair approve
+    -- 4` for a request nobody has seen, and the row it lands on may belong to
+    -- another room entirely.
+    ref         TEXT,
     seat        TEXT REFERENCES agents(name),
     status      TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | denied
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),

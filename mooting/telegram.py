@@ -684,23 +684,26 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
         if args[:1] == ["list"]:
             if not seat:
                 return await say(msg.chat.id, "You are not paired here.")
-            rows = store.pairings("pending")
+            rows = store.pairings("pending", chat_id=msg.chat.id)
             if not rows:
-                return await say(msg.chat.id, "No pending requests.")
+                return await say(msg.chat.id, "No pending requests here.")
             return await say(msg.chat.id, "\n".join(
-                f"- `{r['id']}` {r['display'] or r['user_id']}" for r in rows))
+                f"- `{r['ref'] or r['id']}` {r['display'] or r['user_id']}"
+                for r in rows))
 
         if args[:1] == ["approve"]:
             if not seat:
                 return await say(msg.chat.id,
                                  "Only a paired member can approve. Ask one.")
-            try:
-                pid = int(args[1])
-            except (IndexError, ValueError):
+            if len(args) < 2:
                 return await say(msg.chat.id, "Usage: `/pair approve <id>`")
-            want = store.q1("SELECT * FROM pairings WHERE id = ?", (pid,))
+            # Scoped to this chat: a request from another room is not this
+            # room's to answer, and a small integer invited exactly that.
+            want = store.pairing_by_ref(args[1], chat_id=msg.chat.id)
             if want is None:
-                return await say(msg.chat.id, f"No pairing request `{pid}`.")
+                return await say(msg.chat.id,
+                                 f"No request `{args[1]}` waiting in this chat.")
+            pid = int(want["id"])
             # Naming them should not be part of approving them: their own
             # display name is the name they already answer to.
             target = (args[2] if len(args) > 2 else
@@ -716,10 +719,13 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
         if args[:1] == ["deny"]:
             if not seat:
                 return await say(msg.chat.id, "Only a paired member can do that.")
-            try:
-                store.pair_deny(int(args[1]), seat)
-            except (IndexError, ValueError):
+            if len(args) < 2:
                 return await say(msg.chat.id, "Usage: `/pair deny <id>`")
+            want = store.pairing_by_ref(args[1], chat_id=msg.chat.id)
+            if want is None:
+                return await say(msg.chat.id,
+                                 f"No request `{args[1]}` waiting in this chat.")
+            store.pair_deny(int(want["id"]), seat)
             return await say(msg.chat.id, f"Request `{args[1]}` denied.")
 
         if seat:
@@ -1018,8 +1024,10 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                 reply_markup=keys, parse_mode=ParseMode.HTML)
         except Exception as exc:
             log.warning("join keyboard failed: %s", exc)
-            await say(chat_id, f"{who} asks to join. `/pair approve {pid}` to let "
-                               f"them in.")
+            row = store.q1("SELECT ref FROM pairings WHERE id = ?", (pid,))
+            handle = (row["ref"] if row and row["ref"] else pid)
+            await say(chat_id, f"{who} asks to join. `/pair approve {handle}` to "
+                               f"let them in.")
 
     async def send_picker(chat_id, *, message_id: int | None = None) -> None:
         """The topic list, as one button per row.

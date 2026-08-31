@@ -18,6 +18,7 @@ import json
 import hashlib
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import uuid
@@ -273,6 +274,7 @@ class Store:
                                    ("topics", "chair", "TEXT"),
                                    ("rooms", "topic", "TEXT"),
                                    ("topics", "room_id", "INTEGER"),
+                                   ("pairings", "ref", "TEXT"),
                                    ("mentions", "asking", "INTEGER NOT NULL DEFAULT 1"),
                                    ("tasks", "base_sha", "TEXT")):
             cols = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
@@ -280,6 +282,15 @@ class Store:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
                 if (table, column) == ("mentions", "asking"):
                     self._backfill_asking()
+
+
+        # Every open, not only when the column is added: a request with no handle
+        # cannot be answered, and one can arrive that way from an older board or
+        # a path that forgot to set it. The table is small and this is idempotent.
+        for row in self._conn.execute(
+                "SELECT id FROM pairings WHERE ref IS NULL OR ref = ''").fetchall():
+            self._conn.execute("UPDATE pairings SET ref = ? WHERE id = ?",
+                               (secrets.token_hex(3), row["id"]))
 
     def _backfill_asking(self) -> None:
         """Decide, for mentions written before the column existed, which were asks.
@@ -920,9 +931,9 @@ class Store:
         """Record an unknown sender. Inert until somebody approves them."""
         with self.tx() as c:
             c.execute(
-                "INSERT OR IGNORE INTO pairings (channel, chat_id, user_id, display) "
-                "VALUES (?, ?, ?, ?)",
-                (channel, str(chat_id), str(user_id), display))
+                "INSERT OR IGNORE INTO pairings (channel, chat_id, user_id, display, ref) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (channel, str(chat_id), str(user_id), display, secrets.token_hex(3)))
         row = self.pairing(chat_id, user_id, channel)
         return int(row["id"])
 
@@ -984,10 +995,35 @@ class Store:
             self._emit(c, None, "pairing", by,
                        {"pairing_id": pairing_id, "action": "denied"})
 
-    def pairings(self, status: str | None = None) -> list[sqlite3.Row]:
+    def pairings(self, status: str | None = None, chat_id: str | None = None,
+                 channel: str = "telegram") -> list[sqlite3.Row]:
+        """Pairings, optionally for one room.
+
+        Listing every room's pending requests in a chat told whoever asked that
+        other rooms exist and who is trying to get into them.
+        """
+        sql, args = "SELECT * FROM pairings WHERE 1=1", []
         if status:
-            return self.q("SELECT * FROM pairings WHERE status = ? ORDER BY id", (status,))
-        return self.q("SELECT * FROM pairings ORDER BY id")
+            sql, args = sql + " AND status = ?", args + [status]
+        if chat_id is not None:
+            sql = sql + " AND channel = ? AND chat_id = ?"
+            args = args + [channel, str(chat_id)]
+        return self.q(sql + " ORDER BY id", args)
+
+    def pairing_by_ref(self, ref: str, chat_id: str | None = None,
+                       channel: str = "telegram") -> sqlite3.Row | None:
+        """A request by the handle a person types, in this room only.
+
+        `chat_id` is not optional in a chat: approving is a decision about who
+        joins *this* council, and a request from another room is not this room's
+        to answer.
+        """
+        sql = "SELECT * FROM pairings WHERE (ref = ? OR CAST(id AS TEXT) = ?)"
+        args = [str(ref).strip().lower(), str(ref).strip()]
+        if chat_id is not None:
+            sql += " AND channel = ? AND chat_id = ?"
+            args += [channel, str(chat_id)]
+        return self.q1(sql + " LIMIT 1", args)
 
     def seat_for_chat(self, chat_id: str, user_id: str,
                       channel: str = "telegram") -> str | None:
