@@ -111,6 +111,74 @@ def _no_tools_hint(kind: str, agent: str) -> str:
     return "MCP server not visible; check the per-run --mcp-config injection."
 
 
+#: What a coding CLI reads from its working directory before it sees anything
+#: this project wrote. Names, not contents: finding one is the finding.
+CONTEXT_FILES = ("CLAUDE.md", "AGENTS.md", "GEMINI.md", ".cursorrules",
+                 ".github/copilot-instructions.md")
+
+#: Per-directory memory a CLI keeps for itself, keyed by the directory it ran in.
+MEMORY_DIRS = (".claude/projects", ".gemini/tmp", ".codex/sessions")
+
+
+def context_leaks(cwd: str) -> list[str]:
+    """What a seat pointed at `cwd` would read before the council's own prompt.
+
+    Found live: a council asked "how can I make money" answered with the chair's
+    age, city and profession. None of it was on the board. The seat was pointed
+    at a working directory, and its CLI had four memory files there.
+    """
+    import os
+    from pathlib import Path
+
+    found = []
+    here = Path(cwd)
+    for folder in [here, *here.parents]:
+        for name in CONTEXT_FILES:
+            if (folder / name).is_file():
+                found.append(str(folder / name))
+        if folder == Path(folder.anchor):
+            break
+
+    # The CLI's own per-directory memory, which is keyed by the path and so is
+    # invisible from inside the directory itself.
+    # `C:\dev` is stored as `C--dev`: every separator becomes a dash, the colon
+    # included. Matched exactly, because `C--dev` and `C--dev-Something` are
+    # different projects and warning about the wrong one is noise.
+    slug = "".join("-" if ch in ':\/' else ch for ch in str(here))
+    for base in MEMORY_DIRS:
+        candidate = Path.home() / base / slug
+        if candidate.is_dir() and any(candidate.rglob("*.md")):
+            found.append(str(candidate))
+    return found
+
+
+def report_context(board: Store, seats) -> int:
+    """Warn about seats that would read somebody's notes into a council."""
+    import json
+
+    hits = 0
+    for a in seats:
+        cwd = json.loads(a["driver_cfg"]).get("cwd")
+        if not cwd:
+            continue
+        leaks = context_leaks(cwd)
+        if not leaks:
+            continue
+        hits += 1
+        print(f"  {a['name']}: reads {len(leaks)} file(s) from {cwd} before this "
+              f"council's own prompt")
+        for path in leaks[:3]:
+            print(f"      {path}")
+        if len(leaks) > 3:
+            print(f"      … and {len(leaks) - 3} more")
+    if hits:
+        print("\n  A deliberating seat should sit in a directory that says nothing.")
+        print("  Point it somewhere empty, and name the repository separately:")
+        print("      mooting agents add <seat> <kind> --cwd <empty dir> "
+              "--repo <your project>")
+    return hits
+
+
 async def run_doctor(board: Store, only: str | None = None, timeout: float = 180.0) -> int:
     wanted = {s.strip() for s in only.split(",")} if only else None
     seats = [a for a in board.agents()
@@ -121,6 +189,10 @@ async def run_doctor(board: Store, only: str | None = None, timeout: float = 180
         return 1
 
     print(f"board: {board.path}")
+    # Before spending a turn: a seat that reads somebody's notes is wrong in a
+    # way no probe would show, because the wake succeeds and the answer is good.
+    if report_context(board, seats):
+        print()
     print(f"probing {len(seats)} seat(s); each spends one real turn on that CLI.\n")
 
     # Sequential on purpose: a parallel probe makes a rate-limit look like a bug.

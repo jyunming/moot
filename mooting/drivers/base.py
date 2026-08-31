@@ -58,7 +58,26 @@ class Seat:
 
     @property
     def cwd(self) -> str:
+        """Where the CLI runs while it is deliberating.
+
+        Not the repository. A coding CLI reads whatever its working directory
+        means to it -- `CLAUDE.md`, `AGENTS.md`, its own per-directory memory --
+        before it ever sees the prompt this project wrote, so a seat pointed at a
+        working project brings that project's notes into an unrelated council.
+        Found live: a council asked "how can I make money" came back with the
+        person's age, city and profession, none of which was on the board.
+        """
         return self.cfg.get("cwd") or os.getcwd()
+
+    @property
+    def repo(self) -> str | None:
+        """The repository this seat works in, when it has been given one.
+
+        Separate from `cwd` because the two want opposite things: deliberation
+        wants a directory that says nothing, and work wants the project. One
+        setting could not be both, and the shared one silently chose leaking.
+        """
+        return self.cfg.get("repo") or None
 
     @property
     def capability(self) -> str:

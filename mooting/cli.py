@@ -135,6 +135,8 @@ def cmd_setup(args) -> int:
 def cmd_agents_add(args) -> int:
     board = _board(args)
     cfg = {"cwd": os.path.abspath(args.cwd)} if args.cwd else {}
+    if args.repo:
+        cfg["repo"] = os.path.abspath(args.repo)
     if args.model:
         cfg["model"] = args.model
     if args.effort:
@@ -740,7 +742,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = ag.add_parser("add")
     p.add_argument("name")
     p.add_argument("kind", choices=["claude", "codex", "copilot", "gemini", "agy", "human", "external"])
-    p.add_argument("--cwd", help="repo the agent works in")
+    p.add_argument("--cwd", help="where the seat runs while deliberating; keep it "
+                                 "empty, a coding CLI reads what it finds there")
+    p.add_argument("--repo", help="the repository this seat works in, for work "
+                                  "topics; separate from --cwd on purpose")
     p.add_argument("--model")
     p.add_argument("--driver", choices=["stdio_json", "acp", "spawn", "none"])
     p.add_argument("--effort", choices=["low", "medium", "high"],

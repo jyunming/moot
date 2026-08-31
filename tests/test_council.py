@@ -1465,3 +1465,51 @@ def test_nothing_changes_when_no_seat_is_executing(board):
     assert board.executing_now() == []
     board.decide(pid, "human", approve=True, rationale="ordinary day")
     assert board.proposal(pid)["status"] == "approved"
+
+
+# --------------------------------------------------------- what a seat reads
+#
+# Found live: a council asked "how can I make money" answered with the chair's
+# age, city and profession. None of it was on the board. The seat was pointed at
+# a working directory, and its CLI had four memory files there.
+
+
+def test_a_directory_with_agent_notes_is_reported(tmp_path):
+    from mooting.doctor import context_leaks
+
+    clean = tmp_path / "empty"
+    clean.mkdir()
+    assert context_leaks(str(clean)) == []
+
+    (tmp_path / "CLAUDE.md").write_text("notes about me", encoding="utf-8")
+    found = context_leaks(str(clean))
+    assert len(found) == 1, found
+    assert found[0].endswith("CLAUDE.md"), "a parent directory's notes are read too"
+
+
+def test_every_kind_of_notes_counts(tmp_path):
+    """Each CLI reads its own file, and a council does not care which."""
+    from mooting.doctor import context_leaks
+
+    for name in ("CLAUDE.md", "AGENTS.md", "GEMINI.md", ".cursorrules"):
+        room = tmp_path / name.replace(".", "_")
+        room.mkdir()
+        (room / name).write_text("x", encoding="utf-8")
+        assert context_leaks(str(room)), f"{name} went unnoticed"
+
+
+def test_a_seats_own_context_is_not_its_repository(board):
+    """The two settings want opposite things, and one setting chose leaking."""
+    from mooting.drivers.base import Seat
+
+    seat = Seat(topic_id=1, topic_slug="t", agent="santa", kind="claude",
+                cli_session=None,
+                cfg={"cwd": r"C:\empty", "repo": r"C:\dev\project"})
+    assert seat.cwd == r"C:\empty"
+    assert seat.repo == r"C:\dev\project"
+
+    # A seat with no repository named has none, rather than quietly using the
+    # directory it was given to keep a council clean.
+    plain = Seat(topic_id=1, topic_slug="t", agent="sam", kind="codex",
+                 cli_session=None, cfg={"cwd": r"C:\empty"})
+    assert plain.repo is None

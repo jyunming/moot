@@ -84,6 +84,14 @@ should be reachable after the fact needs an explicit command — that is why
 so the live working board committed itself to a public repo. If this project is
 ever renamed again, grep `.gitignore` first.
 
+**A seat reads its working directory before it reads your prompt.** A coding
+CLI loads `CLAUDE.md`, `AGENTS.md` or its own per-directory memory from wherever
+it runs. Point a seat at a project and that project's notes join the council: a
+board asked "how can I make money" answered with the chair's age, city and
+profession, none of which was anywhere on the board. `cwd` is the seat's context
+and should say nothing; `repo` is what work topics branch from. `mooting doctor`
+reports a seat pointed somewhere with notes in it.
+
 **Tests that chdir still write to the real home directory.** `default_db_path`
 centralises boards under `~/.mooting/boards`, so a test that only monkeypatches
 the cwd leaves a board behind every run. Patch `mooting.store.HOME_BOARDS` too.

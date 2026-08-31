@@ -569,7 +569,10 @@ class Supervisor:
             return
         tid = int(task["id"])
         cfg = json.loads(self.store.agent(task["assignee"])["driver_cfg"])
-        repo = cfg.get("cwd") or str(Path.cwd())
+        # `repo` if the seat was given one, and only then its context directory.
+        # A seat pointed at an empty directory to keep a council clean has no
+        # repository there, and branching from it is not what anybody meant.
+        repo = cfg.get("repo") or cfg.get("cwd") or str(Path.cwd())
         branch = f"mooting/task-{tid}"
         tree = Path(self.store.path).parent / "work" / f"task-{tid}"
         try:
