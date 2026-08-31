@@ -695,7 +695,7 @@ async def test_a_proposal_can_be_read_in_full_before_ruling_on_it(tmp_path, boar
     assert "capped at 6 attempts" in text          # the body, not just the title
     assert "codex" in text and "object" in text
     assert "stampede risk is overstated" in text   # and why they objected
-    assert f"/approve {pid}" in text               # what to do about it
+    assert f"/approve {board.proposal(pid)['ref']}" in text               # what to do about it
 
 
 @pytest.mark.asyncio
@@ -735,7 +735,7 @@ async def test_proposal_numbers_are_not_message_numbers(tmp_path, board):
         app.board.handle(f"/proposals {pid}")
 
     text = " ".join(said)
-    assert f"proposal #{pid}" in text
+    assert f"proposal {board.proposal(pid)['ref']}" in text
     assert f"/quote {msg_id}" in text, "the message id to reply to must be given"
 
 
@@ -777,8 +777,8 @@ async def test_an_open_proposal_is_visible_when_you_open_the_topic(tmp_path, boa
         await pilot.pause()
 
         text = " ".join(str(w) for w in written)
-        assert f"proposal #{pid}" in text
-        assert f"/approve {pid}" in text, "it must say how to sign off on it"
+        assert f"proposal {board.proposal(pid)['ref']}" in text
+        assert f"/approve {board.proposal(pid)['ref']}" in text, "it must say how to sign off on it"
 
         # And the status bar and input both say something is waiting.
         app.refresh_board()
@@ -805,7 +805,7 @@ async def test_a_proposal_banner_carries_the_proposal(tmp_path, board):
     md = [p for p in parts if isinstance(p, Markdown)]
     assert md and "Book with the airline" in md[0].markup, "the body must be there"
     assert "codex object" in text and "OTAs are cheaper" in text
-    assert f"/approve {pid}" in text
+    assert f"/approve {board.proposal(pid)['ref']}" in text
 
 
 @pytest.mark.asyncio
@@ -1009,7 +1009,7 @@ async def test_clicking_a_proposal_row_opens_it(tmp_path, board):
         app._open_work_row(str(pid))
 
     text = " ".join(said)
-    assert "the whole reasoning" in text and f"/approve {pid}" in text
+    assert "the whole reasoning" in text and f"/approve {board.proposal(pid)['ref']}" in text
 
 
 @pytest.mark.asyncio

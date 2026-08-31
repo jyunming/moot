@@ -98,6 +98,9 @@ CREATE TABLE IF NOT EXISTS proposals (
     title       TEXT    NOT NULL,
     body        TEXT    NOT NULL,
     status      TEXT    NOT NULL DEFAULT 'open',  -- open|approved|rejected|withdrawn
+    -- What a person types to sign this off. `1`, `2`, `3` next to a decision
+    -- that cannot be undone is an invitation to approve the wrong one.
+    ref         TEXT,
     decided_by  TEXT,                       -- MUST be a human seat; enforced in store.py
     rationale   TEXT,
     created_at  TEXT    NOT NULL DEFAULT (datetime('now')),

@@ -138,8 +138,10 @@ def _fmt_event(store: Store, ev, me: str) -> str | None:
 
     if ev.kind == "proposal" and ev.payload.get("action") == "opened":
         pid = ev.payload["proposal_id"]
-        return (f"\n{YELLOW}{BOLD}◆ proposal #{pid}{RESET} {YELLOW}{ev.payload['title']}{RESET}"
-                f"\n{DIM}  by {ev.actor} — waiting on you: /approve {pid}  |  /reject {pid}{RESET}\n")
+        h = ev.payload.get("ref") or pid
+        return (f"\n{YELLOW}{BOLD}◆ proposal {h}{RESET} {YELLOW}{ev.payload['title']}{RESET}"
+                f"\n{DIM}  by {ev.actor} — waiting on you: /approve {h}  |  "
+                f"/reject {h}{RESET}\n")
 
     if ev.kind == "decision":
         return (f"\n{GREEN}✓ proposal #{ev.payload['proposal_id']} "
@@ -622,9 +624,10 @@ class Console:
         if undecided and not force:
             self.emit(f"{YELLOW}there is a decision still waiting on you:{RESET}")
             for p in undecided:
-                self.emit(f"  proposal #{p['id']} {p['title']}")
+                self.emit(f"  proposal {p['ref'] or p['id']} {p['title']}")
                 self.emit(f"    {DIM}/proposals {p['id']} to read it · "
-                          f"/approve {p['id']} <why> · /reject {p['id']} <why>{RESET}")
+                          f"/approve {p['ref'] or p['id']} <why> · "
+                          f"/reject {p['ref'] or p['id']} <why>{RESET}")
             self.emit(f"{DIM}sign off on it, or /conclude force <closing words> to close "
                       f"the meeting with it unresolved{RESET}")
             return
@@ -859,7 +862,8 @@ class Console:
         for p in rows:
             votes = ", ".join(f"{v['agent']}:{v['stance']}"
                               for v in self.store.votes(p["id"]))
-            self.emit(f"  proposal #{p['id']} [{p['status']}] {p['title']}  "
+            self.emit(f"  proposal {p['ref'] or p['id']} [{p['status']}] "
+                      f"{p['title']}  "
                       f"{DIM}{votes}{RESET}")
         self.emit(f"{DIM}/proposals <n> for the whole thing — those are proposal "
                   f"numbers, not the #n beside a message{RESET}")
@@ -877,7 +881,7 @@ class Console:
             self.emit(f"{RED}{exc}{RESET}")
             return
         self.emit("")
-        self.emit(f"{BOLD}proposal #{p['id']} {p['title']}{RESET}  "
+        self.emit(f"{BOLD}proposal {p['ref'] or p['id']} {p['title']}{RESET}  "
                   f"{DIM}[{p['status']}] by {p['author']}{RESET}")
         # Proposal numbers and message numbers are different counters, and typing
         # one where the other is expected quotes the wrong thing without complaint.
@@ -900,7 +904,8 @@ class Console:
                     self.emit(f"    {DIM}{v['rationale'].strip()}{RESET}")
         if p["status"] == "open":
             self.emit("")
-            self.emit(f"{DIM}/approve {pid} <why>   |   /reject {pid} <why>{RESET}")
+            h = p['ref'] or pid
+            self.emit(f"{DIM}/approve {h} <why>   |   /reject {h} <why>{RESET}")
 
     def _show(self, rest: str) -> None:
         """One message in full, however far back it scrolled."""

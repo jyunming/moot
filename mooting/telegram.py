@@ -1072,7 +1072,7 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
         pid = int(pr["id"])
         body = (pr["body"] or "").strip()
         preview = body if len(body) < 600 else body[:600].rstrip() + "…"
-        text = (f"**proposal #{pid}** {pr['title']}\n"
+        text = (f"**proposal `{pr['ref'] or pid}`** {pr['title']}\n"
                 f"_by {pr['author']}_\n\n{preview}")
         # ids are short; Telegram caps callback_data at 64 bytes and these are
         # nowhere near it.
@@ -1235,7 +1235,7 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
 
         if what == "full":
             await call.answer()
-            return await say(chat_id, f"**proposal #{pid}** {pr['title']}\n\n"
+            return await say(chat_id, f"**proposal `{pr['ref'] or pid}`** {pr['title']}\n\n"
                                       f"{pr['body']}")
 
         if pr["status"] != "open":
