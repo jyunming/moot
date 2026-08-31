@@ -273,6 +273,7 @@ class Store:
                                    ("topics", "effort", "TEXT"),
                                    ("topics", "chair", "TEXT"),
                                    ("rooms", "topic", "TEXT"),
+                                   ("rooms", "host", "TEXT"),
                                    ("topics", "room_id", "INTEGER"),
                                    ("pairings", "ref", "TEXT"),
                                    ("mentions", "asking", "INTEGER NOT NULL DEFAULT 1"),
@@ -841,6 +842,28 @@ class Store:
 
     def rooms(self) -> list[sqlite3.Row]:
         return self.q("SELECT * FROM rooms ORDER BY id")
+
+    def room_host(self, room_id: int) -> str | None:
+        """Whose room this is, if anybody's yet.
+
+        Not the same as a topic's chair. A chair runs one meeting and can be
+        handed over; a host owns the room and decides who is let into it. Being
+        let into a council is not being handed the ability to let others in.
+        """
+        row = self.q1("SELECT host FROM rooms WHERE id = ?", (room_id,))
+        return row["host"] if row and row["host"] else None
+
+    def claim_room(self, room_id: int, who: str) -> str:
+        """Make somebody the host, if the room has none. Returns the host."""
+        held = self.room_host(room_id)
+        if held:
+            return held
+        if not self.is_human(who):
+            raise NotAuthorised(f"{who!r} is not a human seat; an agent cannot "
+                                f"host a room")
+        with self.tx() as c:
+            c.execute("UPDATE rooms SET host = ? WHERE id = ?", (who, room_id))
+        return who
 
     def set_room_topic(self, room_id: int, slug: str | None) -> None:
         """Remember where a room is standing, across restarts."""

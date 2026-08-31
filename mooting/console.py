@@ -1448,6 +1448,7 @@ class Console:
             self.emit(f"  {BOLD}{name}{RESET}  {DIM}{r['channel']}{RESET}")
             self.emit(f"     team    {team}")
             self.emit(f"     on      {r['topic'] or '—'}")
+            self.emit(f"     host    {self.store.room_host(int(r['id'])) or '—'}")
             self.emit(f"     people  {people} paired")
             if r["channel"] == "telegram":
                 self.emit(f"     {DIM}--chat {r['chat_id']}   to keep the bot to "

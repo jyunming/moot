@@ -692,9 +692,11 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                 for r in rows))
 
         if args[:1] == ["approve"]:
-            if not seat:
+            host = store.room_host(store.ensure_room("telegram", str(msg.chat.id)))
+            if not seat or (host and seat != host):
                 return await say(msg.chat.id,
-                                 "Only a paired member can approve. Ask one.")
+                                 f"Only {host or 'a paired member'} can let "
+                                 f"somebody into this council.")
             if len(args) < 2:
                 return await say(msg.chat.id, "Usage: `/pair approve <id>`")
             # Scoped to this chat: a request from another room is not this
@@ -740,6 +742,7 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             pid = store.pair_request(msg.chat.id, msg.from_user.id,
                                      msg.from_user.full_name or "")
             store.pair_approve(pid, human, human)
+            store.claim_room(store.ensure_room("telegram", str(msg.chat.id)), human)
             return await say(
                 msg.chat.id,
                 f"Paired. You speak as **{human}**, the seat you already hold."
@@ -843,6 +846,44 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             # If the upload is refused the meeting still has to arrive.
             log.warning("could not send minutes as a document: %s", exc)
             await say(chat_id, head + "\n\n" + text)
+
+    @dp.message(lambda m: bool(getattr(m, "new_chat_members", None)))
+    async def on_join(msg: Message):
+        """Somebody was added to the group.
+
+        Telegram says who added them, and that is the fact this needs: an invite
+        from the host of the room is the host deciding, and anybody else adding
+        somebody is not. Without this the bot never saw a person arrive at all,
+        so joining did nothing and the newcomer had to know to type `/pair`.
+        """
+        if not allowed(msg.chat.id):
+            return
+        room_id = store.ensure_room("telegram", str(msg.chat.id))
+        host = store.room_host(room_id)
+        added_by = store.seat_for_chat(msg.chat.id, msg.from_user.id)
+
+        for member in msg.new_chat_members:
+            if getattr(member, "is_bot", False):
+                continue
+            if store.seat_for_chat(msg.chat.id, member.id):
+                continue                        # already one of us
+            who = member.full_name or str(member.id)
+            pid = store.pair_request(msg.chat.id, member.id, who)
+            if host and added_by == host:
+                # The host of the room adding somebody is the host deciding.
+                seat = store.seat_name_for(who, fallback=f"guest{pid}")
+                try:
+                    row = store.pair_approve(pid, seat, host)
+                except (StoreError, NotAuthorised) as exc:
+                    await say(msg.chat.id, str(exc))
+                    continue
+                await say(msg.chat.id,
+                          f"{who} was added by {host} and speaks as "
+                          f"**{row['seat']}**.")
+                continue
+            await say_join_request(
+                msg.chat.id, pid,
+                f"{who}" + (f", added by {added_by}" if added_by else ""))
 
     @dp.message(lambda m: m.document is not None)
     async def on_document(msg: Message):
@@ -1078,11 +1119,13 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             if not allowed(chat_id):
                 return await call.answer("not this chat", show_alert=True)
             presser = store.seat_for_chat(chat_id, call.from_user.id)
-            if not presser:
-                # The same rule as `/pair approve`: a member decides who joins.
+            room_id = store.ensure_room("telegram", str(chat_id))
+            host = store.room_host(room_id)
+            if not presser or (host and presser != host):
+                # A guest let into a council must not be able to let others in.
                 return await call.answer(
-                    "Only somebody already in this council can answer that.",
-                    show_alert=True)
+                    f"Only {host or 'somebody already in this council'} can "
+                    f"answer that.", show_alert=True)
             want = store.q1("SELECT * FROM pairings WHERE id = ?", (pid,))
             if want is None:
                 return await call.answer("that request is gone", show_alert=True)
@@ -1096,6 +1139,7 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                                               f"let in.")
                 seat = store.seat_name_for(want["display"], fallback=f"guest{pid}")
                 row = store.pair_approve(pid, seat, presser)
+                store.claim_room(store.ensure_room("telegram", str(chat_id)), presser)
             except (StoreError, NotAuthorised) as exc:
                 return await call.answer(str(exc)[:180], show_alert=True)
             await call.answer(f"{row['seat']} is in")

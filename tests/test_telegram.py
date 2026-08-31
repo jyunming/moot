@@ -1206,3 +1206,51 @@ def test_the_chair_can_still_remove_what_is_theirs(tmp_path):
         assert chat.console.store.topics() == []
     finally:
         chat.close()
+
+
+def test_a_room_has_a_host_and_it_is_not_a_topics_chair(board):
+    """Two different things. A chair runs one meeting and can be handed over;
+    a host owns the room and decides who is let into it."""
+    board.add_agent("Guest", "human")
+    rid = board.ensure_room("telegram", "-100111")
+    assert board.room_host(rid) is None
+
+    assert board.claim_room(rid, "jeremy") == "jeremy"
+    # Claiming is once: a guest arriving later does not take the room.
+    assert board.claim_room(rid, "Guest") == "jeremy"
+    assert board.room_host(rid) == "jeremy"
+
+    # And a chair is per topic, assignable, and says nothing about the room.
+    tid = board.open_topic("t", "T", "b", "Guest", seats=("jeremy", "Guest"))
+    assert board.chair(tid) == "Guest"
+    assert board.room_host(rid) == "jeremy"
+
+
+def test_an_agent_cannot_host_a_room(board):
+    rid = board.ensure_room("telegram", "-100111")
+    with pytest.raises(NotAuthorised):
+        board.claim_room(rid, "santa")
+    assert board.room_host(rid) is None
+
+
+def test_a_guest_cannot_let_more_guests_in(tmp_path):
+    """The rule the removal guards were about, applied to the door.
+
+    Any paired member could approve a request, so somebody let into a council
+    could let in anybody else — which is the whole thing pairing exists to stop.
+    """
+    from mooting.store import connect
+
+    db = tmp_path / "board.db"
+    s = connect(db, init=True)
+    s.add_agent("Host", "human")
+    s.add_agent("Guest", "human")
+    rid = s.ensure_room("telegram", "-100111")
+    s.claim_room(rid, "Host")
+    try:
+        assert s.room_host(rid) == "Host"
+        # The check the chat and the button both make.
+        for presser, may in (("Host", True), ("Guest", False)):
+            assert (presser == s.room_host(rid)) is may
+    finally:
+        s.close()
