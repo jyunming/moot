@@ -847,6 +847,25 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             log.warning("could not send minutes as a document: %s", exc)
             await say(chat_id, head + "\n\n" + text)
 
+    async def owns_this_group(chat_id, user_id) -> bool:
+        """Whether Telegram says this account created the group.
+
+        The room's own `host` is a name claimed by whoever paired first, which is
+        an inference about ordering rather than a fact about the group. Telegram
+        holds the fact, so ask it: the person who made the group is the host of
+        it, whatever order people were let in.
+
+        False for a one-to-one chat, which has no creator, and false when the
+        call fails -- a request that cannot be checked is one to put up for
+        somebody to answer, not one to wave through.
+        """
+        try:
+            member = await bot.get_chat_member(chat_id, user_id)
+        except Exception as exc:
+            log.warning("could not ask who owns %s: %s", chat_id, exc)
+            return False
+        return getattr(member, "status", None) == "creator"
+
     @dp.message(lambda m: bool(getattr(m, "new_chat_members", None)))
     async def on_join(msg: Message):
         """Somebody was added to the group.
@@ -869,17 +888,21 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                 continue                        # already one of us
             who = member.full_name or str(member.id)
             pid = store.pair_request(msg.chat.id, member.id, who)
-            if host and added_by == host:
-                # The host of the room adding somebody is the host deciding.
+            by_owner = await owns_this_group(msg.chat.id, msg.from_user.id)
+            if by_owner or (host and added_by == host):
+                # Whoever made the group, or whoever hosts the room, adding
+                # somebody is that person deciding.
+                if by_owner and added_by:
+                    host = store.claim_room(room_id, added_by)
                 seat = store.seat_name_for(who, fallback=f"guest{pid}")
                 try:
-                    row = store.pair_approve(pid, seat, host)
+                    row = store.pair_approve(pid, seat, added_by or host or seat)
                 except (StoreError, NotAuthorised) as exc:
                     await say(msg.chat.id, str(exc))
                     continue
                 await say(msg.chat.id,
-                          f"{who} was added by {host} and speaks as "
-                          f"**{row['seat']}**.")
+                          f"{who} was added by {added_by or 'the group owner'} "
+                          f"and speaks as **{row['seat']}**.")
                 continue
             await say_join_request(
                 msg.chat.id, pid,

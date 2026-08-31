@@ -584,6 +584,12 @@ def cmd_pair(args) -> int:
         seat = args.seat or board.seat_name_for(want["display"],
                                                 fallback=f"guest{args.approve}")
         row = board.pair_approve(int(args.approve), seat, who)
+        # Approving from a terminal is how a room is bootstrapped, and it left
+        # the room with no host at all -- so the first person to approve
+        # somebody in the chat afterwards became one by accident.
+        if row["channel"] == "telegram":
+            board.claim_room(board.ensure_room("telegram", row["chat_id"]),
+                             row["seat"])
         print(f"{row['display'] or row['user_id']} speaks as {row['seat']}")
     elif args.deny:
         board.pair_deny(int(args.deny), who)
