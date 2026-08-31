@@ -112,6 +112,26 @@ turn" is one measurement on one prompt on one machine and says so.
 **Commits.** Present tense, lower case, one line saying what changed and why it
 mattered. The body is for the failure being fixed, not a diff summary.
 
+**Answering the person you are working with.** Show it, then say one line about
+it. A wall of prose describing behaviour is harder to check than the behaviour:
+
+```
+/team Santa Sam   →  team here: Santa, Sam — new meetings start with them
+/topic new x      →  seats: Santa, Sam, Jeremy
+```
+
+Rules, in order of how much they matter:
+
+1. **Lead with the example.** A command and its output, a before/after table, or
+   the actual error text. Prose is the caption, not the substance.
+2. **Answer the question that was asked, and stop.** Related work is one line at
+   the end, or the next message.
+3. **One screen.** If it does not fit, the parts that do not fit are a separate
+   message the person can ask for.
+4. **No section headings for three sentences.** They make a short answer look
+   like a report.
+5. **Say the number.** "30 wakes down to 6" beats "significantly fewer wakes".
+
 ## Working here
 
 ```bash
