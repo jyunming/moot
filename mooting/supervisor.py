@@ -413,7 +413,8 @@ class Supervisor:
                 log.exception("driver %s raised for %s", driver.kind, agent)
                 result = WakeResult.failure(f"{type(exc).__name__}: {exc}")
 
-            self.store.finish_wake(wake_id, "ok" if result.ok else "error", result.detail)
+            self.store.finish_wake(wake_id, "ok" if result.ok else "error",
+                               result.detail, result.usage)
 
             spoke = self.store.q1(
                 "SELECT COUNT(*) c FROM messages WHERE topic_id = ? AND author = ?",
@@ -628,7 +629,8 @@ class Supervisor:
         except Exception as exc:
             log.exception("task driver failed for %s", agent)
             result = WakeResult.failure(f"{type(exc).__name__}: {exc}")
-        self.store.finish_wake(wake_id, "ok" if result.ok else "error", result.detail)
+        self.store.finish_wake(wake_id, "ok" if result.ok else "error",
+                               result.detail, result.usage)
         self.store.set_seat_state(topic_id, agent, "idle" if result.ok else "failed")
 
         tid = int(task["id"])

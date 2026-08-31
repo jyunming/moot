@@ -1560,3 +1560,53 @@ def test_a_wake_still_running_is_not_counted_as_failed(board):
 
     row = board.usage()[0]
     assert row["wakes"] == 1 and row["failed"] == 0 and row["ok"] == 0
+
+
+# ------------------------------------------------ what the CLI says it spent
+#
+# Counted by the vendor, not by us: what matters is what came off the
+# subscription, and only the CLI knows that. Read defensively, because none of
+# them promise to keep the shape.
+
+
+def test_a_claude_result_envelope_is_read():
+    from mooting.drivers.base import usage_in
+
+    got = usage_in('{"type":"result","subtype":"success","total_cost_usd":0.0412,'
+                   '"duration_ms":31800,"usage":{"input_tokens":10432,'
+                   '"output_tokens":518},"session_id":"abc"}')
+    assert got == {"cost_usd": 0.0412, "tokens_in": 10432, "tokens_out": 518}
+
+
+def test_a_stream_of_objects_is_read_too():
+    from mooting.drivers.base import usage_in
+
+    got = usage_in('{"type":"start"}\n'
+                   '{"usage":{"prompt_tokens":9,"completion_tokens":3}}')
+    assert got == {"tokens_in": 9, "tokens_out": 3}
+
+
+def test_a_cli_that_says_nothing_is_not_recorded_as_free():
+    """Missing is missing. A turn nobody costed stays unpriced."""
+    from mooting.drivers.base import usage_in
+
+    assert usage_in("codex says nothing about cost") == {}
+    assert usage_in('{"total_cost_usd": ') == {}, "half a line must not be a number"
+    assert usage_in("") == {}
+    assert usage_in('{"usage": "not a dict"}') == {}
+
+
+def test_the_ledger_keeps_what_it_was_told_and_nothing_else(board):
+    topic = open_debate(board)
+
+    priced = board.record_wake(topic, "claude")
+    board.finish_wake(priced, "ok", "", {"tokens_in": 10432, "tokens_out": 518,
+                                         "cost_usd": 0.0412})
+    silent = board.record_wake(topic, "codex")
+    board.finish_wake(silent, "ok", "")
+
+    by = {r["agent"]: r for r in board.usage()}
+    assert by["claude"]["tokens_in"] == 10432
+    assert by["claude"]["cost_usd"] == 0.0412
+    assert by["codex"]["tokens_in"] is None, "a silent CLI was recorded as zero"
+    assert by["codex"]["cost_usd"] is None

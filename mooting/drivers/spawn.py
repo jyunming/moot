@@ -152,6 +152,7 @@ class SpawnDriver(Driver):
             ok=True,
             cli_session=self.extract_session(out, err, proposed) if self.stateful else None,
             tail=tail,
+            usage=self.usage_from(out, err),
         )
 
 

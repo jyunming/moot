@@ -140,6 +140,13 @@ CREATE TABLE IF NOT EXISTS wakes (
     agent       TEXT NOT NULL,
     outcome     TEXT NOT NULL,              -- ok|timeout|error|refused
     detail      TEXT NOT NULL DEFAULT '',
+    -- What the CLI itself said this turn cost. Only some report it, so NULL
+    -- means "not told", never "free". This is the vendor's own count of what
+    -- came off your subscription; the wake row beside it is only how often we
+    -- asked.
+    tokens_in   INTEGER,
+    tokens_out  INTEGER,
+    cost_usd    REAL,
     started_at  TEXT NOT NULL DEFAULT (datetime('now')),
     ended_at    TEXT
 );

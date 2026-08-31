@@ -1465,6 +1465,17 @@ class Console:
             if seat:
                 line += f"   {DIM}{seat['turns_used']}/{seat['max_turns']} turns here{RESET}"
             self.emit(line)
+            # What the CLI itself said it spent. Absent for a CLI that does not
+            # say, which is not the same as free, so the line is simply omitted.
+            if r["tokens_in"] or r["tokens_out"] or r["cost_usd"]:
+                bits = []
+                if r["tokens_in"] or r["tokens_out"]:
+                    bits.append(f"{int(r['tokens_in'] or 0):,} in / "
+                                f"{int(r['tokens_out'] or 0):,} out tokens")
+                if r["cost_usd"]:
+                    bits.append(f"${r['cost_usd']:.4f}")
+                self.emit(f"  {DIM}{'':<10} {' · '.join(bits)}  (reported by the CLI)"
+                          f"{RESET}")
         # The ceiling that actually bites, and the one nothing showed.
         self.emit("")
         for r in rows:

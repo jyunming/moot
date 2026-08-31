@@ -278,6 +278,9 @@ class Store:
                                    ("pairings", "ref", "TEXT"),
                                    ("agents", "tg_user_id", "TEXT"),
                                    ("mentions", "asking", "INTEGER NOT NULL DEFAULT 1"),
+                                   ("wakes", "tokens_in", "INTEGER"),
+                                   ("wakes", "tokens_out", "INTEGER"),
+                                   ("wakes", "cost_usd", "REAL"),
                                    ("tasks", "base_sha", "TEXT")):
             cols = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
             if column not in cols:
@@ -1712,11 +1715,20 @@ class Store:
             )
             return int(cur.lastrowid)
 
-    def finish_wake(self, wake_id: int, outcome: str, detail: str = "") -> None:
+    def finish_wake(self, wake_id: int, outcome: str, detail: str = "",
+                    usage: dict | None = None) -> None:
+        """Close a wake, with whatever the CLI said the turn cost.
+
+        `usage` is what the vendor reported, not what we counted: only some CLIs
+        say, so the columns stay NULL rather than zero when they do not.
+        """
+        u = usage or {}
         with self.tx() as c:
             c.execute(
-                "UPDATE wakes SET outcome = ?, detail = ?, ended_at = datetime('now') WHERE id = ?",
-                (outcome, detail[:2000], wake_id),
+                "UPDATE wakes SET outcome = ?, detail = ?, ended_at = datetime('now'), "
+                "tokens_in = ?, tokens_out = ?, cost_usd = ? WHERE id = ?",
+                (outcome, detail[:2000], u.get("tokens_in"), u.get("tokens_out"),
+                 u.get("cost_usd"), wake_id),
             )
 
     def sweep_stale_wakes(self, older_than_s: int = 1800) -> int:
@@ -1765,12 +1777,16 @@ class Store:
                        SUM(CAST(strftime('%s', ended_at) AS INTEGER)
                            - CAST(strftime('%s', started_at) AS INTEGER))
                                                                   AS seconds,
+                       SUM(tokens_in)                             AS tokens_in,
+                       SUM(tokens_out)                            AS tokens_out,
+                       SUM(cost_usd)                              AS cost_usd,
                        MAX(started_at)                            AS last
                 FROM wakes WHERE 1=1 {window} GROUP BY agent
                 ORDER BY wakes DESC""", args)
         return [{"agent": r["agent"], "wakes": r["wakes"], "ok": r["ok"] or 0,
                  "failed": r["failed"] or 0, "seconds": r["seconds"] or 0,
-                 "last": r["last"]} for r in rows]
+                 "tokens_in": r["tokens_in"], "tokens_out": r["tokens_out"],
+                 "cost_usd": r["cost_usd"], "last": r["last"]} for r in rows]
 
     def wakes_in_last_hour(self, agent: str) -> int:
         """Metered CLIs charge for a failed wake too, so this counts attempts,
