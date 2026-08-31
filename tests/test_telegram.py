@@ -1424,3 +1424,36 @@ def test_a_name_with_no_account_is_left_as_written(board):
     assert with_mentions(board, "no names here") == "no names here"
     # And an address that is not a seat is not touched either.
     assert "@nobody" in with_mentions(board, "ask @nobody")
+
+
+def test_a_command_addressed_to_this_bot_is_still_a_command():
+    """A group can hold several bots, so Telegram addresses a tapped command to
+    one of them: `/seats` arrives as `/seats@jeremy_mooting_bot`.
+
+    Commands with their own handler had the mention stripped for them and
+    worked. Everything through the shared dispatch arrived with it attached and
+    came back "unknown /seats@jeremy_mooting_bot" — invisible in a one-to-one
+    chat, where Telegram appends nothing, which is where this was all tested.
+    """
+    from mooting.telegram import addressed_here
+
+    us = "jeremy_mooting_bot"
+    assert addressed_here("/seats", us) == "/seats"
+    assert addressed_here("/seats@jeremy_mooting_bot", us) == "/seats"
+    assert addressed_here("/topic@jeremy_mooting_bot new a question", us) == \
+        "/topic new a question"
+    assert addressed_here("/run@JEREMY_MOOTING_BOT", us) == "/run", "case matters not"
+    assert addressed_here("plain talk", us) == "plain talk"
+
+
+def test_another_bots_command_is_not_ours_to_answer():
+    from mooting.telegram import addressed_here
+
+    assert addressed_here("/seats@someone_else_bot", "jeremy_mooting_bot") is None
+
+
+def test_nothing_is_stripped_before_the_name_is_known():
+    """Safer direction: a command nobody claims beats one answered twice."""
+    from mooting.telegram import addressed_here
+
+    assert addressed_here("/seats@any_bot", None) == "/seats"

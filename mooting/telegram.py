@@ -426,6 +426,28 @@ def parse_pick(data: str) -> int | None:
     return int(parts[1])
 
 
+def addressed_here(text: str, username: str | None) -> str | None:
+    """The command with our own `@mention` removed, or None if it is not ours.
+
+    A group can hold several bots, so Telegram addresses a tapped command to one
+    of them: `/seats` becomes `/seats@jeremy_mooting_bot`. Commands with their
+    own aiogram handler had the mention stripped for them and worked; everything
+    that goes through the shared dispatch arrived with it attached and came back
+    "unknown /seats@jeremy_mooting_bot". Invisible in a one-to-one chat, where
+    Telegram appends nothing, which is where all of this was tested.
+    """
+    body = (text or "").strip()
+    if not body.startswith("/"):
+        return body
+    head, sep, rest = body.partition(" ")
+    name, at, target = head.partition("@")
+    if not at:
+        return body
+    if username and target.lower() != username.lower():
+        return None                     # somebody else's bot was asked
+    return f"{name}{sep}{rest}" if sep else name
+
+
 def wants_picker(text: str) -> bool:
     """`/topic` or `/topics` with nothing after it.
 
@@ -625,6 +647,9 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             return None
 
     claim = {"code": _first_code()}
+    #: Filled in at startup. Until then no mention is stripped, which is the safe
+    #: direction: a command nobody claims is better than one answered twice.
+    me: dict[str, str | None] = {"username": None}
     #: Which topic each chat is standing on; a council spans many messages.
     #: Where each chat is standing. `None` means the topic it was on has gone,
     #: which is different from never having had one only in how it got here.
@@ -1348,13 +1373,16 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             pid = store.pair_request(msg.chat.id, msg.from_user.id, who)
             await say(msg.chat.id, "You are not paired here yet.")
             return await say_join_request(msg.chat.id, pid, who)
+        line = addressed_here(msg.text, me["username"])
+        if line is None:
+            return                      # addressed to another bot in this group
         # `/topic` with no verb is somebody asking where they are and where
         # else they could be. That is a list to tap, not a slug to retype.
-        if wants_picker(msg.text):
+        if wants_picker(line):
             return await send_picker(msg.chat.id)
         # Ask for a proposal by number and it comes back with its buttons,
         # whenever it was opened.
-        want = proposal_ref(msg.text)
+        want = proposal_ref(line)
         if want is not None:
             try:
                 pr = store.proposal(want)
@@ -1363,7 +1391,7 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             return await say_proposal(msg.chat.id, pr)
 
         slug = topic_here(msg.chat.id)
-        if (not slug and not msg.text.strip().startswith("/")
+        if (not slug and not line.startswith("/")
                 and store.topics_for_room(
                     store.ensure_room("telegram", str(msg.chat.id)))):
             # Something to post and nowhere to post it. Offering the councils
@@ -1384,7 +1412,7 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                 pass
         board = ChatBoard(db, slug, seat, room=("telegram", str(msg.chat.id)))
         try:
-            out = board.handle(msg.text.strip())
+            out = board.handle(line)
             # Remember where this chat is standing, so the next message from
             # anybody in the room lands on the same topic.
             if board.topic:
@@ -1453,6 +1481,7 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
         # Without this the client offers nothing and every command has to be
         # remembered -- which is what openclaw gets right and we did not.
         try:
+            me["username"] = (await bot.get_me()).username
             await bot.set_my_commands([BotCommand(command=c, description=d)
                                        for c, d in MENU])
             print(f"  menu    {len(MENU)} commands registered — type / in the "
