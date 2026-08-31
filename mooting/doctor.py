@@ -51,6 +51,25 @@ class Probe:
         return f"[{mark}] {self.agent:<12} {self.kind:<9} {self.detail}{sess}"
 
 
+def usage_line(usage: dict) -> str:
+    """What this CLI told us the probe turn cost, in one line.
+
+    Only some report it, and the ones that do not are not free -- they are
+    unmeasured. Saying which is which is the whole point: `doctor` already
+    spends one real turn per seat, so it is the one place that can answer this
+    without guessing from documentation.
+    """
+    if not usage:
+        return "reports no usage"
+    bits = []
+    if usage.get("tokens_in") or usage.get("tokens_out"):
+        bits.append(f"{int(usage.get('tokens_in') or 0):,} in / "
+                    f"{int(usage.get('tokens_out') or 0):,} out")
+    if usage.get("cost_usd"):
+        bits.append(f"${usage['cost_usd']:.4f}")
+    return "reports " + ", ".join(bits)
+
+
 async def probe_agent(board: Store, agent: str, kind: str, timeout: float) -> Probe:
     cls = DRIVER_CLASSES.get(kind)
     if cls is None:
@@ -82,7 +101,9 @@ async def probe_agent(board: Store, agent: str, kind: str, timeout: float) -> Pr
     if posted:
         if result.cli_session:
             board.set_cli_session(tid, agent, result.cli_session)
-        return Probe(agent, kind, True, "reached the board", result.cli_session, driver.stateful)
+        return Probe(agent, kind, True,
+                     f"reached the board; {usage_line(result.usage)}",
+                     result.cli_session, driver.stateful)
 
     if "NO-MOOTING-TOOLS" in (result.tail or ""):
         return Probe(agent, kind, False, _no_tools_hint(kind, agent))
