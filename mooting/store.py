@@ -582,7 +582,8 @@ class Store:
             c.execute("UPDATE seats SET max_turns = max_turns + ? WHERE topic_id = ?",
                       (n, topic_id))
 
-    def conclude(self, topic_id: int, by: str, note: str = "") -> int:
+    def conclude(self, topic_id: int, by: str, note: str = "",
+                 via: str = "local") -> int:
         """Close the meeting, on the record.
 
         A meeting that just stops is not the same as one that concluded, and the
@@ -594,6 +595,10 @@ class Store:
         """
         if not self.is_human(by):
             raise NotAuthorised(f"{by!r} is not a human seat; only a human closes a meeting")
+        if via == "local" and self.executing_now():
+            raise NotAuthorised(
+                "a seat is executing and holds a shell on this machine; conclude "
+                "from a chat, or wait for it to finish")
         seated = self.chair(topic_id)
         if seated and by != seated:
             raise NotAuthorised(
@@ -1477,7 +1482,20 @@ class Store:
     def votes(self, pid: int) -> list[sqlite3.Row]:
         return self.q("SELECT * FROM votes WHERE proposal_id = ? ORDER BY agent", (pid,))
 
-    def decide(self, pid: int, decider: str, approve: bool, rationale: str = "") -> None:
+    def executing_now(self) -> list[sqlite3.Row]:
+        """Seats holding a shell on this machine right now.
+
+        A seat woken for an approved task runs with its restrictions dropped so
+        it can do the work, which means a shell. That is the whole window this
+        project has: while it is open, a command typed on this machine cannot be
+        told apart from one that seat typed.
+        """
+        return self.q(
+            "SELECT k.id, k.title, k.assignee, t.slug FROM tasks k "
+            "JOIN topics t ON t.id = k.topic_id WHERE k.status = 'in_progress'")
+
+    def decide(self, pid: int, decider: str, approve: bool, rationale: str = "",
+               via: str = "local") -> None:
         """Close a proposal. Humans only -- this is the whole point of the platform.
 
         Agents deliberate and vote; votes are advisory. The transition that lets a
@@ -1490,6 +1508,24 @@ class Store:
                 f"{decider!r} is not a human seat; only a human closes a proposal. "
                 "Agents may vote (support/object) -- votes are advisory."
             )
+        # The two-key rule says a seat edits files only when a person approved
+        # the task and it was woken for one. It says nothing about the shell that
+        # comes with the editing, and `mooting approve 3` is one command away
+        # from there -- identity here is a name, and a seat running as the same
+        # user can pass any name. A decision typed on this machine while that is
+        # true cannot be attributed, so it is refused rather than trusted.
+        #
+        # Not a fence around the machine, which is not this project's to build.
+        # It closes the one window this project opens itself, and it names the
+        # way out: a chat account is something the seat does not hold.
+        running = self.executing_now() if via == "local" else []
+        if running:
+            work = running[0]
+            raise NotAuthorised(
+                f"{work['assignee']} is executing task #{work['id']} "
+                f"({work['title']!r}) and holds a shell on this machine, so a "
+                f"sign-off typed here cannot be told from one it typed. Sign off "
+                f"from a chat, or wait for the task to finish.")
         p = self.proposal(pid)
         # Anybody may call a meeting and argue in it; one person closes it. Without
         # this, approving somebody into a room handed them the same authority as

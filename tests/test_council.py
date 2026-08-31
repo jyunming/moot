@@ -1382,3 +1382,86 @@ def test_a_team_follows_a_rename_and_forgets_a_deleted_seat(board):
     counts = board.delete_agent("codex")
     assert counts["teams"] == 1, "the seat left the team quietly"
     assert board.room_team(rid) == ["Santa"]
+
+
+# ------------------------------------------------- the window execution opens
+#
+# The two-key rule says a seat edits files only when a person approved the task
+# and it was woken for one. It says nothing about the shell that comes with the
+# editing, and `mooting approve 3` is one command away from there: identity is a
+# name, and a seat running as the same user can pass any name.
+
+
+def _mid_task(board):
+    """A board with a seat executing an approved task.
+
+    Written straight into the table rather than through `draft_task`: what is
+    under test is what `executing_now` sees, not how a task got there.
+    """
+    topic = board.open_topic("work", "Work", "b", "human", seats=("human", "claude"))
+    with board.tx() as c:
+        c.execute("UPDATE topics SET mode = 'work' WHERE id = ?", (topic,))
+        c.execute("INSERT INTO tasks (topic_id, title, assignee, created_by, status) "
+                  "VALUES (?,?,?,?,'in_progress')",
+                  (topic, "Do the thing", "claude", "human"))
+    return topic
+
+
+def test_a_signoff_typed_beside_a_running_seat_is_refused(board):
+    topic = open_debate(board)
+    pid = board.propose(topic, "claude", "Cap at 6", "body")
+    _mid_task(board)
+
+    assert board.executing_now(), "no seat is holding a shell"
+    with pytest.raises(NotAuthorised) as caught:
+        board.decide(pid, "human", approve=True, rationale="looks right")
+    said = str(caught.value)
+    assert "holds a shell" in said
+    assert "from a chat" in said, "refused without saying the way out"
+    assert board.proposal(pid)["status"] == "open"
+
+
+def test_the_same_signoff_from_a_chat_is_fine(board):
+    """A chat account is something the seat does not hold."""
+    topic = open_debate(board)
+    pid = board.propose(topic, "claude", "Cap at 6", "body")
+    _mid_task(board)
+
+    board.decide(pid, "human", approve=True, rationale="from my phone", via="telegram")
+    assert board.proposal(pid)["status"] == "approved"
+
+
+def test_the_window_closes_when_the_task_does(board):
+    topic = open_debate(board)
+    pid = board.propose(topic, "claude", "Cap at 6", "body")
+    _mid_task(board)
+
+    with pytest.raises(NotAuthorised):
+        board.decide(pid, "human", approve=True)
+
+    with board.tx() as c:
+        c.execute("UPDATE tasks SET status = 'done'")
+    assert board.executing_now() == []
+    board.decide(pid, "human", approve=True, rationale="now it is quiet")
+    assert board.proposal(pid)["status"] == "approved"
+
+
+def test_concluding_is_held_to_the_same_rule(board):
+    """Closing a meeting is a decision too, and reachable the same way."""
+    topic = open_debate(board)
+    _mid_task(board)
+
+    with pytest.raises(NotAuthorised):
+        board.conclude(topic, "human", "calling it")
+    board.conclude(topic, "human", "calling it", via="telegram")
+    assert board.topic(topic)["status"] == "resolved"
+
+
+def test_nothing_changes_when_no_seat_is_executing(board):
+    """The rule is about an open window, not a permanent tax on the terminal."""
+    topic = open_debate(board)
+    pid = board.propose(topic, "claude", "Cap at 6", "body")
+
+    assert board.executing_now() == []
+    board.decide(pid, "human", approve=True, rationale="ordinary day")
+    assert board.proposal(pid)["status"] == "approved"

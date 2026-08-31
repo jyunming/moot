@@ -1266,7 +1266,7 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             pending[key] = (pid, approve, seat)
             return True
         try:
-            store.decide(pid, seat, approve=approve, rationale=why)
+            store.decide(pid, seat, approve=approve, rationale=why, via="telegram")
         except (StoreError, NotAuthorised) as exc:
             await say(msg.chat.id, str(exc))
             return True

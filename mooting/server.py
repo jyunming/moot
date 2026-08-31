@@ -186,7 +186,7 @@ def build_app(db: Path | str | None, token: str, *, human: str,
         approve = bool(body["approve"])
         why = (body.get("why") or "").strip()
         try:
-            s.decide(pid, who, approve=approve, rationale=why)
+            s.decide(pid, who, approve=approve, rationale=why, via="remote")
         except NotAuthorised as exc:
             return web.json_response({"error": str(exc)}, status=403)
         except StoreError as exc:

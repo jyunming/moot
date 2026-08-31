@@ -635,7 +635,7 @@ class Console:
             self.emit(f"{DIM}(recorded in the minutes){RESET}")
 
         try:
-            self.store.conclude(self.topic_id, self.me, note)
+            self.store.conclude(self.topic_id, self.me, note, via=self.via())
         except StoreError as exc:
             self.emit(f"{RED}{exc}{RESET}")
             return
@@ -1395,6 +1395,16 @@ class Console:
         self.emit(f"{DIM}only for a task you have approved on a work topic, and only "
                   f"in its own git worktree{RESET}")
 
+    def via(self) -> str:
+        """Which machine this session speaks from.
+
+        A terminal session is the machine the board lives on, and a chat is not.
+        The difference matters when a seat is executing: a command typed beside
+        a running seat cannot be told from one that seat typed, and a message
+        from a chat account can.
+        """
+        return "local" if tuple(self.room) == Store.LOCAL_ROOM else "telegram"
+
     def room_id(self) -> int:
         """This room's id, created the first time something needs it."""
         return self.store.ensure_room(*self.room)
@@ -1555,7 +1565,8 @@ class Console:
             self.emit(f"{RED}usage: /{cmd} <proposal id> [reason]{RESET}")
             return
         try:
-            self.store.decide(int(pid_s), self.me, cmd == "approve", why.strip())
+            self.store.decide(int(pid_s), self.me, cmd == "approve", why.strip(),
+                              via=self.via())
         except StoreError as exc:
             self.emit(f"{RED}{exc}{RESET}")
 
