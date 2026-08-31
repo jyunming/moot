@@ -1339,6 +1339,11 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
         if out:
             await say(msg.chat.id, out)
 
+    def seats_in(chat_id) -> set[str]:
+        """The seats held by people in this chat."""
+        return {r["seat"] for r in store.pairings("approved", chat_id=chat_id)
+                if r["seat"]}
+
     async def pump() -> None:
         """Board events into the chat.
 
@@ -1358,6 +1363,11 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                         if store.topic_visible_in(
                             ev.topic_id,
                             store.ensure_room("telegram", str(chat_id)))
+                        # A person's own words are already in the room they typed
+                        # them in -- Telegram put them there. Sending them back
+                        # made every message appear twice, once from them and
+                        # once from the bot quoting them.
+                        and ev.actor not in seats_in(chat_id)
                     }
                     if (ev.kind == "proposal"
                             and ev.payload.get("action") == "opened"):

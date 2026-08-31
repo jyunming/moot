@@ -1354,3 +1354,39 @@ def test_an_unknown_chat_is_not_a_chat_this_bot_works_in(board):
     assert board.pairings("approved", chat_id="-100111") != []
     assert board.pairings("approved", chat_id="-100999") == [], \
         "an unknown chat looked known"
+
+
+def test_a_room_is_not_told_what_it_just_said(board):
+    """Every message appeared twice: once from the person, once from the bot.
+
+    Telegram already put their words in the room. The pump sent every message
+    event to every listening chat, including the one it came from.
+    """
+    board.pair_approve(board.pair_request("-100111", "42", "Jeremy"),
+                       "jeremy", "jeremy")
+    seats_here = {r["seat"] for r in board.pairings("approved", chat_id="-100111")}
+    assert seats_here == {"jeremy"}
+
+    tid = board.open_topic("t", "T", "b", "jeremy", seats=("jeremy", "santa"))
+    board.post(tid, "jeremy", "what about the roof", count_turn=False)
+    board.post(tid, "santa", "the roof is the expensive half", count_turn=False)
+
+    # What the pump would send to that chat: the seat's answer, not the echo.
+    delivered = [e.actor for e in board.events_since(0, tid)
+                 if e.kind == "message" and e.actor not in seats_here]
+    assert "santa" in delivered
+    assert "jeremy" not in delivered, "the room was sent its own message back"
+
+
+def test_another_rooms_person_is_still_heard(board):
+    """The rule is "already in this room", not "is a person"."""
+    board.add_agent("ege", "human")
+    board.pair_approve(board.pair_request("-100111", "42", "Jeremy"),
+                       "jeremy", "jeremy")
+    tid = board.open_topic("t", "T", "b", "jeremy", seats=("jeremy", "ege", "santa"))
+    board.post(tid, "ege", "from the other chat", count_turn=False)
+
+    seats_here = {r["seat"] for r in board.pairings("approved", chat_id="-100111")}
+    delivered = [e.actor for e in board.events_since(0, tid)
+                 if e.kind == "message" and e.actor not in seats_here]
+    assert "ege" in delivered, "somebody outside this room went unheard"
