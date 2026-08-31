@@ -1022,7 +1022,8 @@ class Console:
         """Where you are, what it is to settle, and what else is open."""
         if self.topic_id is not None:
             self._show_agenda()
-        rows = [t for t in self.store.topics() if not t["slug"].startswith("doctor-")]
+        rows = [t for t in self.store.topics_for_room(self._visible_room())
+                if not t["slug"].startswith("doctor-")]
         if rows:
             self.emit(f"  {DIM}topics{RESET}")
             for t in rows:
@@ -1030,9 +1031,23 @@ class Console:
                 self.emit(f"  {here} {t['slug']:<28} {DIM}{t['mode']}  {t['status']}{RESET}")
         self.emit(f"  {DIM}/topic {' | '.join(self.TOPIC_VERBS)}{RESET}")
 
+    def _visible_room(self) -> int | None:
+        """Which room's meetings this session may see. None at a terminal.
+
+        A terminal sees everything, because unbound topics are everybody's and a
+        desk is where they are opened. A chat sees its own and the unbound ones.
+        """
+        return None if tuple(self.room) == Store.LOCAL_ROOM else self.room_id()
+
     def _switch(self, rest: str) -> None:
         try:
             self.topic = self.store.topic(rest)
+            here = self._visible_room()
+            if here is not None and not self.store.topic_visible_in(
+                    int(self.topic["id"]), here):
+                # Otherwise the isolation is one remembered slug from useless.
+                self.topic = None
+                raise StoreError(f"no such topic: {rest!r}")
             self.topic_id = int(self.topic["id"])
         except StoreError as exc:
             self.emit(f"{RED}{exc}{RESET}")
@@ -1073,11 +1088,16 @@ class Console:
         team = self.store.room_team(self.room_id())
         if team:
             seats = list(team)
+        # A meeting opened in a chat belongs to that chat. One opened at a
+        # terminal belongs to everybody, because starting at the desk and
+        # following it on a phone is the workflow, not a leak.
+        room_id = None if tuple(self.room) == Store.LOCAL_ROOM else self.room_id()
         if self.me not in seats:
             seats.append(self.me)
         try:
             self.store.open_topic(slug, title, title, self.me, seats=seats,
-                                  mode=mode, effort=effort, manager=manager)
+                                  mode=mode, effort=effort, manager=manager,
+                                  room_id=room_id)
         except StoreError as exc:
             self.emit(f"{RED}{exc}{RESET}")
             return

@@ -272,6 +272,7 @@ class Store:
                                    ("topics", "effort", "TEXT"),
                                    ("topics", "chair", "TEXT"),
                                    ("rooms", "topic", "TEXT"),
+                                   ("topics", "room_id", "INTEGER"),
                                    ("mentions", "asking", "INTEGER NOT NULL DEFAULT 1"),
                                    ("tasks", "base_sha", "TEXT")):
             cols = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
@@ -482,6 +483,7 @@ class Store:
         mode: str = "debate",
         effort: str | None = None,
         manager: str | None = None,
+        room_id: int | None = None,
     ) -> int:
         # A slug is looked up by name, but every reference site accepts an id too
         # and decides which by `isdigit()`. So an all-numeric slug creates a topic
@@ -498,9 +500,10 @@ class Store:
             raise StoreError(f"unknown mode {mode!r}; expected one of {sorted(TOPIC_MODES)}")
         with self.tx() as c:
             cur = c.execute(
-                """INSERT INTO topics (slug, title, brief, opened_by, max_rounds, mode, effort)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (slug, title, brief, opened_by, max_rounds, mode, effort),
+                """INSERT INTO topics (slug, title, brief, opened_by, max_rounds,
+                                         mode, effort, room_id)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (slug, title, brief, opened_by, max_rounds, mode, effort, room_id),
             )
             topic_id = int(cur.lastrowid)
             turns = max_rounds if max_turns is None else max_turns
@@ -843,6 +846,28 @@ class Store:
         except StoreError:
             return None
         return row["topic"]
+
+    def topics_for_room(self, room_id: int | None) -> list[sqlite3.Row]:
+        """What this room may see: its own meetings, and the unbound ones.
+
+        A topic opened at a terminal is unbound and stays readable everywhere,
+        because starting at the desk and following on a phone is the workflow.
+        One opened in a chat belongs to that chat, which is what keeps two teams
+        on one board from reading each other.
+        """
+        if room_id is None:
+            return self.q("SELECT * FROM topics WHERE room_id IS NULL ORDER BY id DESC")
+        return self.q("SELECT * FROM topics WHERE room_id IS NULL OR room_id = ? "
+                      "ORDER BY id DESC", (room_id,))
+
+    def topic_visible_in(self, topic_id: int | None, room_id: int | None) -> bool:
+        """Whether a room may be told about something that happened on a topic."""
+        if topic_id is None:
+            return True                      # board-level, belongs to nobody
+        row = self.q1("SELECT room_id FROM topics WHERE id = ?", (topic_id,))
+        if row is None or row["room_id"] is None:
+            return True
+        return row["room_id"] == room_id
 
     def room_team(self, room_id: int) -> list[str]:
         """The seats a meeting opened in this room starts with."""

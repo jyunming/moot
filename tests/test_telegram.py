@@ -901,3 +901,134 @@ def test_a_room_remembers_its_topic_across_a_restart(tmp_path):
         assert again.room_topic("telegram", "-100111") is None
     finally:
         again.close()
+
+
+def _two_room_board(tmp_path):
+    from mooting.store import connect
+
+    db = tmp_path / "board.db"
+    s = connect(db, init=True)
+    s.add_agent("Jeremy", "human")
+    for name in ("Santa", "Sam", "Kevin"):
+        s.add_agent(name, "claude", driver="spawn")
+    s.close()
+    return db
+
+
+def test_a_meeting_opened_in_a_chat_belongs_to_that_chat(tmp_path):
+    from mooting.store import connect
+    from mooting.telegram import ChatBoard
+
+    db = _two_room_board(tmp_path)
+    chat = ChatBoard(db, None, "Jeremy", room=("telegram", "-100111"))
+    try:
+        chat.handle("/topic new engine choice")
+    finally:
+        chat.close()
+
+    s = connect(db)
+    try:
+        mine = s.ensure_room("telegram", "-100111")
+        theirs = s.ensure_room("telegram", "-100222")
+        tid = int(s.topic("engine-choice")["id"])
+
+        assert s.topic_visible_in(tid, mine)
+        assert not s.topic_visible_in(tid, theirs), "the other room can see it"
+        assert [t["slug"] for t in s.topics_for_room(theirs)] == []
+    finally:
+        s.close()
+
+
+def test_a_meeting_opened_at_a_desk_belongs_to_everybody(tmp_path):
+    """Starting at the desk and following it on a phone is the workflow."""
+    from mooting.console import Console
+    from mooting.store import connect
+
+    db = _two_room_board(tmp_path)
+    c = Console(db, None, "Jeremy")
+    c.emit = lambda *_: None
+    try:
+        c.handle("/topic new a question at the desk")
+        tid = c.topic_id
+        assert c.store.topic(tid)["room_id"] is None
+        for chat in ("-100111", "-100222"):
+            assert c.store.topic_visible_in(
+                tid, c.store.ensure_room("telegram", chat))
+    finally:
+        c.store.close()
+
+
+def test_one_room_cannot_switch_into_another_rooms_meeting(tmp_path):
+    """Isolation that a remembered slug defeats is not isolation."""
+    from mooting.telegram import ChatBoard
+
+    db = _two_room_board(tmp_path)
+    a = ChatBoard(db, None, "Jeremy", room=("telegram", "-100111"))
+    try:
+        a.handle("/topic new private to room a")
+    finally:
+        a.close()
+
+    b = ChatBoard(db, None, "Jeremy", room=("telegram", "-100222"))
+    try:
+        out = b.handle("/topic switch private-to-room-a")
+        assert "no such topic" in out, out
+        assert b.topic is None
+        # and it is not offered in the list either
+        assert "private-to-room-a" not in b.handle("/topic list")
+    finally:
+        b.close()
+
+
+def test_the_pump_tells_a_room_only_about_its_own_meetings(tmp_path):
+    """The leak this closes: every event went to every paired chat.
+
+    Exercised through the same check the pump makes, rather than by faking
+    aiogram — the decision is `topic_visible_in`, and the loop only obeys it.
+    """
+    from mooting.store import connect
+    from mooting.telegram import ChatBoard, event_text
+
+    db = _two_room_board(tmp_path)
+    for chat, question in (("-100111", "engine choice"), ("-100222", "aircon")):
+        board = ChatBoard(db, None, "Jeremy", room=("telegram", chat))
+        try:
+            board.handle(f"/topic new {question}")
+        finally:
+            board.close()
+
+    s = connect(db)
+    try:
+        rooms = {c: s.ensure_room("telegram", c) for c in ("-100111", "-100222")}
+        s.post(int(s.topic("engine-choice")["id"]), "Santa", "Godot, and here is why",
+               count_turn=False)
+
+        delivered = {c: [] for c in rooms}
+        for ev in s.events_since(0, None):
+            text = event_text(s, ev)
+            if not text:
+                continue
+            for chat, rid in rooms.items():
+                if s.topic_visible_in(ev.topic_id, rid):
+                    delivered[chat].append(text)
+
+        assert any("Godot" in t for t in delivered["-100111"])
+        assert not any("Godot" in t for t in delivered["-100222"]), \
+            "the other room was told about a meeting that is not its own"
+    finally:
+        s.close()
+
+
+def test_topics_that_predate_rooms_stay_visible_everywhere(tmp_path):
+    """Nothing on an existing board should disappear when this lands."""
+    from mooting.store import connect
+
+    db = _two_room_board(tmp_path)
+    s = connect(db)
+    try:
+        tid = s.open_topic("older", "Older", "b", "Jeremy", seats=("Santa",))
+        assert s.topic(tid)["room_id"] is None
+        for chat in ("-100111", "-100222"):
+            assert s.topic_visible_in(tid, s.ensure_room("telegram", chat))
+    finally:
+        s.close()

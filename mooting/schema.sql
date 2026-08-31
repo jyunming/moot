@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS topics (
     max_rounds  INTEGER NOT NULL DEFAULT 3,
     round       INTEGER NOT NULL DEFAULT 0,
     opened_by   TEXT NOT NULL,
+    -- The room this meeting belongs to, when it was opened in one. NULL means
+    -- it belongs to everybody: a topic opened at a terminal should still be
+    -- readable from a phone, which is the workflow. A topic opened in a chat
+    -- belongs to that chat, which is what keeps two teams apart on one board.
+    room_id     INTEGER REFERENCES rooms(id),
     -- Who signs off here. Anybody may call a meeting and argue in it; one person
     -- closes its proposals and concludes it. NULL means whoever opened it, so a
     -- topic always has a chair without anyone having to name one.

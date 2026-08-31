@@ -971,7 +971,8 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
         """
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-        rows = picker_rows(store.topics(), topic_here(chat_id))
+        rows = picker_rows(store.topics_for_room(
+            store.ensure_room("telegram", str(chat_id))), topic_here(chat_id))
         if not rows:
             return await say(chat_id, "No topics yet — `/topic new <question>`.")
         keys = InlineKeyboardMarkup(inline_keyboard=[
@@ -1112,7 +1113,9 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             return await say_proposal(msg.chat.id, pr)
 
         slug = topic_here(msg.chat.id)
-        if not slug and store.topics() and not msg.text.strip().startswith("/"):
+        if (not slug and not msg.text.strip().startswith("/")
+                and store.topics_for_room(
+                    store.ensure_room("telegram", str(msg.chat.id)))):
             # Something to post and nowhere to post it. Offering the councils
             # that exist beats an error that asks for a slug somebody has to
             # type -- but only for talk. A command answers for itself: hijacking
@@ -1154,13 +1157,22 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             try:
                 targets = listeners()
                 for ev in store.events_since(cursor, None):
+                    # Every event went to every paired chat, so a second group
+                    # read the first group's council live. A room hears about its
+                    # own meetings and the unbound ones, and nothing else.
+                    allowed_here = {
+                        chat_id for chat_id in targets
+                        if store.topic_visible_in(
+                            ev.topic_id,
+                            store.ensure_room("telegram", str(chat_id)))
+                    }
                     if (ev.kind == "proposal"
                             and ev.payload.get("action") == "opened"):
                         # A proposal is the one thing only a human closes, so it
                         # arrives with the way to close it attached.
                         try:
                             pr = store.proposal(int(ev.payload["proposal_id"]))
-                            for chat_id in targets:
+                            for chat_id in allowed_here:
                                 await say_proposal(chat_id, pr)
                         except StoreError:
                             pass
@@ -1168,7 +1180,7 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                         continue
                     text = event_text(store, ev)
                     if text:
-                        for chat_id in targets:
+                        for chat_id in allowed_here:
                             await say(chat_id, text)
                     cursor = ev.id
             except Exception:
