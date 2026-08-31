@@ -82,7 +82,8 @@ meeting is worth. All three are the same object.
 | R1 | **A room owns its team.** Seats are per topic today, so every new meeting is seated by hand and two groups sharing a board share their seats. Give a room a roster — its own seats, their models and working directories — and a topic opened there starts with it. |
 | R2 | **A topic belongs to the room that opened it.** This is what makes two teams real, and it closes a leak: the event pump sends every event from every topic to every paired chat (`events_since(cursor, None)` and every listener), so a second group reads the first group's council live. Binding topics to rooms fixes the visibility and the `/topics` list at once. |
 | R3 | **Effort sets the budget, not just the thinking.** It already picks reasoning depth and now the word budget. Make it the single dial: rounds, seats woken per round and the per-hour ceiling all derive from it, so `low` is a quick second opinion and `high` is a real deliberation. The chair sets it, and setting it is the whole cost conversation. |
-| R4 | **Report what a meeting cost when it ends.** Turns spent per seat, wakes, and what that was against the budget. Nothing shows this today, and "how much did that cost" is the question the effort dial is answering. |
+| R4 ✅ | **Done as `/usage`.** Wakes, failures and time per seat, with each seat's turns on this topic and its headroom against the hourly ceiling — which is per agent across the whole board, so two rooms compete for it and neither could see why the other slowed down. The wake ledger had been recording this since the beginning and nothing ever showed it. |
+| ~~R4~~ | **Report what a meeting cost when it ends.** Turns spent per seat, wakes, and what that was against the budget. Nothing shows this today, and "how much did that cost" is the question the effort dial is answering. |
 
 ## E — The chair's own loop
 

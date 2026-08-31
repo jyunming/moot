@@ -83,6 +83,7 @@ COMMANDS = {
     "/seats": "who is here; /seats add <agent> | /seats rm <agent>",
     "/team": "the seats a new meeting here starts with; /team <a> <b> sets it",
     "/rooms": "where councils meet: the team, the topic, and the chat id",
+    "/usage": "what each seat has spent; /usage hour | day for a window",
     "/attach": "<file> -- feed a document to this council; /attach alone lists",
     "/topic": "new | switch | rename | agenda | mode | manager | rm | list",
     "/topic new": "<title> -- open a topic, same seats",
@@ -338,6 +339,7 @@ class Console:
             "auto": self._auto,
             "proposals": self._proposals, "seats": self._seats, "topic": self._topic,
             "team": self._team, "rooms": self._rooms, "room": self._rooms,
+            "usage": self._usage, "cost": self._usage,
             # Advertised in the help, in the README's own transcript and in the
             # chat menu, and reachable from none of them: it was only ever wired
             # into the `/topic` verb map, which does not list it either.
@@ -1434,6 +1436,41 @@ class Console:
             return
         self.emit(f"{DIM}team here: {', '.join(got)} — new meetings start with them"
                   f"{RESET}")
+
+    def _usage(self, rest: str = "") -> None:
+        """What each seat has spent, and how close it is to the hourly ceiling.
+
+        The ceiling is per agent across the whole board, so two rooms running at
+        once compete for it and neither can see why the other slowed down.
+        """
+        hours = None
+        word = rest.strip().lower()
+        if word in {"hour", "today", "day"}:
+            hours = 1 if word == "hour" else 24
+        rows = self.store.usage(hours)
+        if not rows:
+            self.emit(f"  {DIM}nothing spent yet{RESET}")
+            return
+        span = {None: "all time", 1: "the last hour", 24: "the last day"}[hours]
+        self.emit(f"  {DIM}{span}{RESET}")
+        here = {r["agent"]: r for r in self.store.seats(self.topic_id)} \
+            if self.topic_id else {}
+        for r in rows:
+            mins, secs = divmod(int(r["seconds"]), 60)
+            spent = f"{mins}m {secs:02d}s" if mins else f"{secs}s"
+            line = (f"  {r['agent']:<10} {r['wakes']:>3} wakes  {r['ok']:>3} ok"
+                    f"{'  ' + str(r['failed']) + ' failed' if r['failed'] else ''}"
+                    f"   {spent:>8}")
+            seat = here.get(r["agent"])
+            if seat:
+                line += f"   {DIM}{seat['turns_used']}/{seat['max_turns']} turns here{RESET}"
+            self.emit(line)
+        # The ceiling that actually bites, and the one nothing showed.
+        self.emit("")
+        for r in rows:
+            used = self.store.wakes_in_last_hour(r["agent"])
+            if used:
+                self.emit(f"  {DIM}{r['agent']}: {used}/30 wakes this hour{RESET}")
 
     def _rooms(self, _: str = "") -> None:
         """Where councils meet, and what each room is set up with.

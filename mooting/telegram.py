@@ -316,6 +316,7 @@ MENU = [
     ("seats", "who is here, and how many turns they have left"),
     ("team", "the seats a new meeting here starts with; `team <a> <b>` sets it"),
     ("rooms", "this room: its team, its topic, and its chat id"),
+    ("usage", "what each seat has spent; `usage hour` for the last hour"),
     ("me", "<name> — what the council calls you"),
     ("run", "wake the seats and hold a round"),
     ("stop", "stop after the turn in flight"),

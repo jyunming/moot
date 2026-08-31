@@ -1513,3 +1513,50 @@ def test_a_seats_own_context_is_not_its_repository(board):
     plain = Seat(topic_id=1, topic_slug="t", agent="sam", kind="codex",
                  cli_session=None, cfg={"cwd": r"C:\empty"})
     assert plain.repo is None
+
+
+def test_usage_counts_what_a_metered_cli_charges_for(board):
+    """Wakes, not turns. A wake that fails or produces nothing still cost a
+    request, and `turns_used` counts neither."""
+    topic = open_debate(board)
+
+    for agent, outcome, secs in (("claude", "ok", 40), ("claude", "error", 5),
+                                 ("codex", "ok", 12)):
+        wid = board.record_wake(topic, agent)
+        with board.tx() as c:
+            c.execute("UPDATE wakes SET outcome = ?, "
+                      "ended_at = datetime(started_at, ?) WHERE id = ?",
+                      (outcome, f"+{secs} seconds", wid))
+
+    by = {r["agent"]: r for r in board.usage()}
+    assert by["claude"]["wakes"] == 2
+    assert by["claude"]["ok"] == 1
+    assert by["claude"]["failed"] == 1, "a failed wake was not counted as spend"
+    assert by["claude"]["seconds"] == 45
+    assert by["codex"]["failed"] == 0
+    assert "gemini" not in by, "a seat that never ran should not appear"
+
+
+def test_a_window_narrows_it(board):
+    topic = open_debate(board)
+    old = board.record_wake(topic, "claude")
+    with board.tx() as c:
+        c.execute("UPDATE wakes SET outcome='ok', "
+                  "started_at = datetime('now','-3 hours'), "
+                  "ended_at = datetime('now','-3 hours') WHERE id = ?", (old,))
+    fresh = board.record_wake(topic, "codex")
+    with board.tx() as c:
+        c.execute("UPDATE wakes SET outcome='ok', ended_at=started_at WHERE id = ?",
+                  (fresh,))
+
+    assert {r["agent"] for r in board.usage()} == {"claude", "codex"}
+    assert {r["agent"] for r in board.usage(hours=1)} == {"codex"}
+
+
+def test_a_wake_still_running_is_not_counted_as_failed(board):
+    """`pending` is in flight, not spent badly."""
+    topic = open_debate(board)
+    board.record_wake(topic, "claude")
+
+    row = board.usage()[0]
+    assert row["wakes"] == 1 and row["failed"] == 0 and row["ok"] == 0

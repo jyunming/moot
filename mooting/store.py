@@ -1745,6 +1745,33 @@ class Store:
             (topic_id,),
         )
 
+    def usage(self, hours: float | None = None) -> list[dict]:
+        """What each seat has actually spent, from the wake ledger.
+
+        Wakes rather than turns, because a wake is what a metered CLI charges
+        for: one that fails or produces nothing still cost a request, and
+        `turns_used` counts neither. The ledger has been recording this since the
+        beginning and nothing ever showed it.
+        """
+        window = ("AND started_at > datetime('now', ?)" if hours else "")
+        args = [f"-{hours} hours"] if hours else []
+        rows = self.q(
+            f"""SELECT agent,
+                       COUNT(*)                                   AS wakes,
+                       SUM(outcome = 'ok')                        AS ok,
+                       SUM(outcome NOT IN ('ok', 'pending'))      AS failed,
+                       -- Integer epoch, not julianday: the float arithmetic
+                       -- lost seconds and reported 43 for 45.
+                       SUM(CAST(strftime('%s', ended_at) AS INTEGER)
+                           - CAST(strftime('%s', started_at) AS INTEGER))
+                                                                  AS seconds,
+                       MAX(started_at)                            AS last
+                FROM wakes WHERE 1=1 {window} GROUP BY agent
+                ORDER BY wakes DESC""", args)
+        return [{"agent": r["agent"], "wakes": r["wakes"], "ok": r["ok"] or 0,
+                 "failed": r["failed"] or 0, "seconds": r["seconds"] or 0,
+                 "last": r["last"]} for r in rows]
+
     def wakes_in_last_hour(self, agent: str) -> int:
         """Metered CLIs charge for a failed wake too, so this counts attempts,
         not successes."""
