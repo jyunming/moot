@@ -809,6 +809,11 @@ class Console:
                           f"<{'|'.join(sorted(AGENT_KINDS))}>{RESET}")
                 return
 
+        chaired_by = self.store.chair(self.topic_id)
+        if verb in {"rm", "remove"} and chaired_by and self.me != chaired_by:
+            self.emit(f"{RED}{chaired_by} chairs this meeting — only they can "
+                      f"remove a seat from it{RESET}")
+            return
         seated = self.store.seat(self.topic_id, agent) is not None
         if verb == "add":
             if seated:
@@ -937,6 +942,13 @@ class Console:
             self.emit(f"{RED}{exc}{RESET}")
             return True
         tid = int(t["id"])
+        seated = self.store.chair(tid)
+        if seated and self.me != seated:
+            # Being let into a council is not being handed the ability to delete
+            # it. Somebody invited into one meeting could clear the board.
+            self.emit(f"{RED}{seated} chairs `{t['slug']}` — only they can "
+                      f"delete it{RESET}")
+            return True
         trees = self.store.orphan_worktrees(tid)
 
         if not confirmed:
@@ -957,6 +969,15 @@ class Console:
         return self._land_somewhere() if was_current else True
 
     def _reset(self, rest: str) -> bool:
+        # There is no owner on the board -- only chairs, per meeting -- so there
+        # is nobody this could ask about a board-wide delete. The honest gate is
+        # the machine: whoever holds the board file and the token. A guest in a
+        # chat has neither, and clearing every council was one message away.
+        if tuple(self.room) != Store.LOCAL_ROOM:
+            self.emit(f"{RED}clearing the board is done at the machine it lives "
+                      f"on, not from a chat{RESET}")
+            self.emit(f"  {DIM}mooting reset   in a terminal{RESET}")
+            return True
         topics = self.store.topics()
         if rest.strip() != "yes":
             self.emit(f"{YELLOW}clear all {len(topics)} topic(s)?{RESET}")

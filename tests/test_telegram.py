@@ -1114,3 +1114,95 @@ def test_handles_are_backfilled_onto_a_board_that_predates_them(board, tmp_path)
         assert again.pairing_by_ref(row["ref"], chat_id="-100111") is not None
     finally:
         again.close()
+
+
+def _guest_room(tmp_path):
+    """A host's board, with a guest let into one meeting."""
+    from mooting.store import connect
+
+    db = tmp_path / "board.db"
+    s = connect(db, init=True)
+    s.add_agent("Host", "human")
+    s.add_agent("Guest", "human")
+    s.add_agent("Santa", "claude", driver="spawn")
+    s.open_topic("theirs", "The host's meeting", "b", "Host",
+                 seats=("Host", "Guest", "Santa"))
+    s.close()
+    return db
+
+
+def test_a_guest_cannot_clear_the_board_from_a_chat(tmp_path):
+    """Letting somebody into one council handed them every council.
+
+    `/reset yes` had no identity check at all, and a paired guest is a human
+    seat like any other. There is no owner on the board to ask, so the gate is
+    the machine: whoever holds the file and the token.
+    """
+    from mooting.telegram import ChatBoard
+
+    db = _guest_room(tmp_path)
+    chat = ChatBoard(db, "theirs", "Guest", room=("telegram", "-100111"))
+    try:
+        out = chat.handle("/reset yes")
+        assert "at the machine" in out, out
+        assert chat.console.store.topics(), "a guest cleared the board"
+    finally:
+        chat.close()
+
+
+def test_the_board_can_still_be_cleared_at_the_machine(tmp_path):
+    from mooting.console import Console
+
+    db = _guest_room(tmp_path)
+    c = Console(db, "theirs", "Host")
+    c.emit = lambda *_: None
+    try:
+        c.handle("/reset yes")
+        assert c.store.topics() == []
+    finally:
+        c.store.close()
+
+
+def test_a_guest_cannot_delete_the_meeting_they_were_let_into(tmp_path):
+    from mooting.telegram import ChatBoard
+
+    db = _guest_room(tmp_path)
+    chat = ChatBoard(db, "theirs", "Guest", room=("telegram", "-100111"))
+    try:
+        out = chat.handle("/topic rm theirs yes")
+        assert "chairs" in out and "only they" in out, out
+        assert chat.console.store.topic("theirs") is not None
+    finally:
+        chat.close()
+
+
+def test_a_guest_cannot_unseat_anybody(tmp_path):
+    from mooting.telegram import ChatBoard
+
+    db = _guest_room(tmp_path)
+    chat = ChatBoard(db, "theirs", "Guest", room=("telegram", "-100111"))
+    try:
+        out = chat.handle("/seats rm Santa")
+        assert "chairs this meeting" in out, out
+        seats = {r["agent"] for r in
+                 chat.console.store.seats(chat.console.topic_id)}
+        assert "Santa" in seats, "a guest unseated an agent"
+    finally:
+        chat.close()
+
+
+def test_the_chair_can_still_remove_what_is_theirs(tmp_path):
+    """The guard is about who, not about making removal hard."""
+    from mooting.telegram import ChatBoard
+
+    db = _guest_room(tmp_path)
+    chat = ChatBoard(db, "theirs", "Host", room=("telegram", "-100111"))
+    try:
+        chat.handle("/seats rm Santa")
+        seats = {r["agent"] for r in
+                 chat.console.store.seats(chat.console.topic_id)}
+        assert "Santa" not in seats
+        chat.handle("/topic rm theirs yes")
+        assert chat.console.store.topics() == []
+    finally:
+        chat.close()
