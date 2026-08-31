@@ -315,6 +315,7 @@ MENU = [
     ("topic", "new <question> · agenda <a; b> · chair <name> · list"),
     ("seats", "who is here, and how many turns they have left"),
     ("team", "the seats a new meeting here starts with; `team <a> <b>` sets it"),
+    ("rooms", "this room: its team, its topic, and its chat id"),
     ("me", "<name> — what the council calls you"),
     ("run", "wake the seats and hold a round"),
     ("stop", "stop after the turn in flight"),
@@ -684,7 +685,7 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                 return await say(msg.chat.id, str(exc))
             return await say(msg.chat.id,
                              f"{row['display'] or row['user_id']} now speaks as "
-                             f"**{row['seat']}**.")
+                             f"**{row['seat']}**.\n\nThis chat is `{msg.chat.id}`.")
 
         if args[:1] == ["deny"]:
             if not seat:

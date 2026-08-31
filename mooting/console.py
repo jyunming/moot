@@ -82,6 +82,7 @@ COMMANDS = {
     "/rounds": "<n> -- grant the council more rounds on this topic",
     "/seats": "who is here; /seats add <agent> | /seats rm <agent>",
     "/team": "the seats a new meeting here starts with; /team <a> <b> sets it",
+    "/rooms": "where councils meet: the team, the topic, and the chat id",
     "/attach": "<file> -- feed a document to this council; /attach alone lists",
     "/topic": "new | switch | rename | agenda | mode | manager | rm | list",
     "/topic new": "<title> -- open a topic, same seats",
@@ -336,7 +337,7 @@ class Console:
             "effort": self._effort, "asks": self._asks, "nudge": self._nudge,
             "auto": self._auto,
             "proposals": self._proposals, "seats": self._seats, "topic": self._topic,
-            "team": self._team,
+            "team": self._team, "rooms": self._rooms, "room": self._rooms,
             # Advertised in the help, in the README's own transcript and in the
             # chat menu, and reachable from none of them: it was only ever wired
             # into the `/topic` verb map, which does not list it either.
@@ -1402,6 +1403,34 @@ class Console:
             return
         self.emit(f"{DIM}team here: {', '.join(got)} — new meetings start with them"
                   f"{RESET}")
+
+    def _rooms(self, _: str = "") -> None:
+        """Where councils meet, and what each room is set up with.
+
+        A chat sees only itself. Listing the other rooms there would hand a guest
+        the existence, the chat id and the roster of every room on the board,
+        which is the thing the rooms are for keeping apart.
+        """
+        here = tuple(self.room) != Store.LOCAL_ROOM
+        rows = ([self.store.room(*self.room)] if here else self.store.rooms())
+        rows = [r for r in rows if r is not None]
+        if not rows:
+            self.emit(f"  {DIM}no rooms yet — a chat becomes one the first time "
+                      f"it sets a team or opens a topic{RESET}")
+            return
+        for r in rows:
+            team = ", ".join(self.store.room_team(int(r["id"]))) or "not set"
+            people = self.store.q1(
+                "SELECT COUNT(*) c FROM pairings WHERE channel = ? AND chat_id = ? "
+                "AND status = 'approved'", (r["channel"], r["chat_id"]))["c"]
+            name = r["label"] or r["chat_id"]
+            self.emit(f"  {BOLD}{name}{RESET}  {DIM}{r['channel']}{RESET}")
+            self.emit(f"     team    {team}")
+            self.emit(f"     on      {r['topic'] or '—'}")
+            self.emit(f"     people  {people} paired")
+            if r["channel"] == "telegram":
+                self.emit(f"     {DIM}--chat {r['chat_id']}   to keep the bot to "
+                          f"this room{RESET}")
 
     def _chair(self, rest: str) -> None:
         """Who signs off here. Anybody may call a meeting and argue in it.
