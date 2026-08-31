@@ -241,16 +241,16 @@ class ChatBoard:
     this is where that pays.
     """
 
-    def __init__(self, db, topic, me: str):
+    def __init__(self, db, topic, me: str, room: tuple[str, str] | None = None):
         from .console import Console
         from .store import StoreError
         try:
-            self.console = Console(db, topic, me)
+            self.console = Console(db, topic, me, room=room)
         except StoreError:
             # Second line for the same failure `topic_here` guards: a session
             # with no topic still takes `/topic new`, and one that cannot be
             # built takes nothing at all.
-            self.console = Console(db, None, me)
+            self.console = Console(db, None, me, room=room)
         self.console.auto = False        # the chat drives explicitly, with /run
         self.lines: list[str] = []
         self.console.emit = self.lines.append
@@ -314,6 +314,7 @@ MENU = [
     ("topics", "every council, as buttons — tap one to move this chat to it"),
     ("topic", "new <question> · agenda <a; b> · chair <name> · list"),
     ("seats", "who is here, and how many turns they have left"),
+    ("team", "the seats a new meeting here starts with; `team <a> <b>` sets it"),
     ("me", "<name> — what the council calls you"),
     ("run", "wake the seats and hold a round"),
     ("stop", "stop after the turn in flight"),
@@ -759,7 +760,7 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             return await say(msg.chat.id, "No topic here.")
 
         note = (msg.text or "").partition(" ")[2].strip()
-        board = ChatBoard(db, slug, seat)
+        board = ChatBoard(db, slug, seat, room=("telegram", str(msg.chat.id)))
         try:
             out = board.handle(f"/conclude {note}".strip())
         finally:
@@ -1121,7 +1122,7 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                     await say(msg.chat.id, f"_{seat} joined the council_")
             except StoreError:
                 pass
-        board = ChatBoard(db, slug, seat)
+        board = ChatBoard(db, slug, seat, room=("telegram", str(msg.chat.id)))
         try:
             out = board.handle(msg.text.strip())
             # Remember where this chat is standing, so the next message from

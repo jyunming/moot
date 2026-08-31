@@ -81,6 +81,7 @@ COMMANDS = {
     "/reopen": "resume a meeting you concluded",
     "/rounds": "<n> -- grant the council more rounds on this topic",
     "/seats": "who is here; /seats add <agent> | /seats rm <agent>",
+    "/team": "the seats a new meeting here starts with; /team <a> <b> sets it",
     "/attach": "<file> -- feed a document to this council; /attach alone lists",
     "/topic": "new | switch | rename | agenda | mode | manager | rm | list",
     "/topic new": "<title> -- open a topic, same seats",
@@ -169,9 +170,15 @@ class _ConsoleCompleter:
 
 
 class Console:
-    def __init__(self, db: Path | str | None, topic_ref: str | None, me: str):
+    def __init__(self, db: Path | str | None, topic_ref: str | None, me: str,
+                 room: tuple[str, str] | None = None):
         self.db = db
         self.store = connect(db)
+        #: Which room this session is in. A terminal is the board's own room, so
+        #: rooms are never a special case half the code has to remember. Resolved
+        #: lazily -- a chat rebuilds this object for every message, and creating
+        #: the row each time would be a write per message for nothing.
+        self.room = room or Store.LOCAL_ROOM
         #: A session with no topic is a real state, not an error. You have to be
         #: able to open the thing on an empty board and start from inside it --
         #: being told to go back to the shell first is exactly the break this
@@ -325,6 +332,7 @@ class Console:
             "effort": self._effort, "asks": self._asks, "nudge": self._nudge,
             "auto": self._auto,
             "proposals": self._proposals, "seats": self._seats, "topic": self._topic,
+            "team": self._team,
             # Advertised in the help, in the README's own transcript and in the
             # chat menu, and reachable from none of them: it was only ever wired
             # into the `/topic` verb map, which does not list it either.
@@ -1056,6 +1064,11 @@ class Console:
             mode, effort = here["mode"], here["effort"]
             manager = next((s["agent"] for s in self.store.seats(self.topic_id)
                             if s["role"] == "manager"), None)
+        # A room with a team overrides whatever would have been carried over,
+        # because deciding the team is exactly what setting one is for.
+        team = self.store.room_team(self.room_id())
+        if team:
+            seats = list(team)
         if self.me not in seats:
             seats.append(self.me)
         try:
@@ -1335,6 +1348,36 @@ class Console:
         self.emit(f"{YELLOW}{agent} may now edit files in {path.resolve()}{RESET}")
         self.emit(f"{DIM}only for a task you have approved on a work topic, and only "
                   f"in its own git worktree{RESET}")
+
+    def room_id(self) -> int:
+        """This room's id, created the first time something needs it."""
+        return self.store.ensure_room(*self.room)
+
+    def _team(self, rest: str) -> None:
+        """The seats a meeting opened here starts with.
+
+        Separate from `/seats`, which changes the meeting in front of you and
+        stops there. A seat added for one question should not quietly join every
+        later one, so the lasting change is its own gesture.
+        """
+        rid = self.room_id()
+        names = [w.lstrip("@") for w in rest.split()]
+        if not names:
+            team = self.store.room_team(rid)
+            if team:
+                self.emit(f"  team here: {BOLD}{', '.join(team)}{RESET}")
+            else:
+                self.emit(f"  {DIM}no team set here — a new meeting seats whoever "
+                          f"is on the one you are standing on{RESET}")
+            self.emit(f"  {DIM}/team <agent> <agent> … sets it{RESET}")
+            return
+        try:
+            got = self.store.set_room_team(rid, names, self.me)
+        except (StoreError, NotAuthorised) as exc:
+            self.emit(f"{RED}{exc}{RESET}")
+            return
+        self.emit(f"{DIM}team here: {', '.join(got)} — new meetings start with them"
+                  f"{RESET}")
 
     def _chair(self, rest: str) -> None:
         """Who signs off here. Anybody may call a meeting and argue in it.

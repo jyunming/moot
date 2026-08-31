@@ -753,3 +753,109 @@ def test_the_destructive_commands_stay_off_the_menu(tmp_path):
     listed = {command for command, _ in MENU}
     assert not (listed & set(OFF_MENU)), \
         "a destructive command is one tap from a thumb"
+
+
+def test_a_meeting_opened_in_a_room_starts_with_that_rooms_team(tmp_path):
+    from mooting.store import connect
+    from mooting.telegram import ChatBoard
+
+    db = tmp_path / "board.db"
+    s = connect(db, init=True)
+    s.add_agent("Jeremy", "human")
+    for name in ("Santa", "Sam", "Kevin"):
+        s.add_agent(name, "claude", driver="spawn")
+    s.close()
+
+    room = ("telegram", "-100111")
+    chat = ChatBoard(db, None, "Jeremy", room=room)
+    try:
+        chat.handle("/team Santa Kevin")
+        chat.handle("/topic new which engine should we use")
+        seats = {r["agent"] for r in chat.console.store.seats(chat.console.topic_id)}
+    finally:
+        chat.close()
+
+    assert seats == {"Santa", "Kevin", "Jeremy"}, seats
+    assert "Sam" not in seats, "a seat outside the team was seated anyway"
+
+
+def test_two_rooms_on_one_board_seat_their_own_teams(tmp_path):
+    """The scenario this exists for: agents with A/B/C in one chat and D/E/F in
+    another, on one board, without either team leaking into the other."""
+    from mooting.store import connect
+    from mooting.telegram import ChatBoard
+
+    db = tmp_path / "board.db"
+    s = connect(db, init=True)
+    s.add_agent("Jeremy", "human")
+    for name in ("Santa", "Sam", "Kevin"):
+        s.add_agent(name, "claude", driver="spawn")
+    s.close()
+
+    seated = {}
+    for room_id, team, question in ((("telegram", "-100111"), "Santa Sam", "engine choice"),
+                                    (("telegram", "-100222"), "Kevin", "aircon efficiency")):
+        chat = ChatBoard(db, None, "Jeremy", room=room_id)
+        try:
+            chat.handle(f"/team {team}")
+            chat.handle(f"/topic new {question}")
+            seated[room_id[1]] = {r["agent"] for r in
+                                  chat.console.store.seats(chat.console.topic_id)}
+        finally:
+            chat.close()
+
+    assert seated["-100111"] == {"Santa", "Sam", "Jeremy"}
+    assert seated["-100222"] == {"Kevin", "Jeremy"}
+
+
+def test_seating_somebody_for_one_meeting_does_not_join_them_to_the_team(tmp_path):
+    """`/seats add` is the temporary gesture; `/team` is the one that sticks."""
+    from mooting.store import connect
+    from mooting.telegram import ChatBoard
+
+    db = tmp_path / "board.db"
+    s = connect(db, init=True)
+    s.add_agent("Jeremy", "human")
+    for name in ("Santa", "Sam"):
+        s.add_agent(name, "claude", driver="spawn")
+    s.close()
+
+    room = ("telegram", "-100111")
+    chat = ChatBoard(db, None, "Jeremy", room=room)
+    try:
+        chat.handle("/team Santa")
+        chat.handle("/topic new first question")
+        chat.handle("/seats add Sam")
+        first = {r["agent"] for r in chat.console.store.seats(chat.console.topic_id)}
+        assert "Sam" in first, "the temporary seat did not take"
+
+        # The next meeting starts from the team, not from what the last one grew into.
+        chat.handle("/topic new second question")
+        second = {r["agent"] for r in chat.console.store.seats(chat.console.topic_id)}
+        assert second == {"Santa", "Jeremy"}, second
+    finally:
+        chat.close()
+
+
+def test_a_terminal_session_has_a_room_of_its_own(tmp_path):
+    """No chat behind it, and still not a special case."""
+    from mooting.console import Console
+    from mooting.store import Store, connect
+
+    db = tmp_path / "board.db"
+    s = connect(db, init=True)
+    s.add_agent("me", "human")
+    s.add_agent("claude", "claude", driver="spawn")
+    s.close()
+
+    c = Console(db, None, "me")
+    try:
+        assert c.room == Store.LOCAL_ROOM
+        c.emit = lambda *_: None
+        c.handle("/team claude")
+        c.handle("/topic new a question at the desk")
+        assert {r["agent"] for r in c.store.seats(c.topic_id)} == {"claude", "me"}
+        # and it is a different room from any chat
+        assert c.store.room_team(c.store.ensure_room("telegram", "-100111")) == []
+    finally:
+        c.store.close()
