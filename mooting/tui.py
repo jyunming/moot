@@ -373,12 +373,11 @@ class MootApp(App):
         a decision exists somewhere else. You cannot rule on a title.
         """
         head = Text.assemble(("◆ proposal ", "bold yellow"),
-                             (f"{pr['ref'] or pr['id']} ", "bold yellow"),
+                             (f"#{pr['id']} ", "bold yellow"),
                              (pr["title"], "yellow"),
                              (f"   by {pr['author']}", "dim"))
-        h = pr["ref"] or pr["id"]
-        act = Text(f"   /approve {h} <why>  ·  /reject {h} <why>"
-                   f"  ·  /proposals {h} to re-read",
+        act = Text(f"   /approve {pr['id']} <why>  ·  /reject {pr['id']} <why>"
+                   f"  ·  /proposals {pr['id']} to re-read",
                    "bold yellow")
         body = pr["body"].strip()
         out = ["", head]
@@ -460,10 +459,9 @@ class MootApp(App):
             pieces.append(Padding(quoted, (0, 1), style=bg))
         rendered = Markdown(body) if body else Text("")
         pid = field(m, "proposal_id")
-        handle = field(m, "proposal_ref") or pid
         if m["kind"] == "propose" and pid:
             pieces.append(Padding(
-                Text(f"◆ proposal {handle} — /approve {handle} <why> to rule on it",
+                Text(f"◆ proposal #{pid} — /approve {pid} <why> to rule on it",
                      "bold yellow"), (0, 1), style=bg))
         # Padding, not a bare style: it extends the band across the full width, so
         # a reply is one block rather than a ragged right edge following the text.
@@ -525,14 +523,12 @@ class MootApp(App):
             return self._render_message(row)
         if ev.kind == "proposal" and ev.payload.get("action") == "opened":
             pid = ev.payload["proposal_id"]
-            self.notify_turn(
-                f"proposal {ev.payload.get('ref') or pid} needs your ruling")
+            self.notify_turn(f"proposal #{pid} needs your ruling")
             try:
                 return self._render_proposal(store.proposal(pid))
             except Exception as exc:
                 log.warning("could not render proposal %s: %s", pid, exc)
-                h = ev.payload.get("ref") or pid
-                return mk(f"[yellow]◆ proposal {h} — /proposals {h}[/yellow]")
+                return mk(f"[yellow]◆ proposal #{pid} — /proposals {pid}[/yellow]")
         if ev.kind == "decision":
             return mk(f"\n[green]✓ proposal #{ev.payload['proposal_id']} "
                       f"{ev.payload['status']} by {escape(ev.actor)}[/green]")

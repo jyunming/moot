@@ -398,7 +398,7 @@ def cmd_conclude(args) -> int:
     if undecided and not args.force:
         print(f"`{t['slug']}` has {len(undecided)} decision(s) still waiting on you:")
         for p in undecided:
-            print(f"  proposal {p['ref'] or p['id']} {p['title']}")
+            print(f"  proposal #{p['id']} {p['title']}")
         print("sign off on them first, or --force to close with them unresolved")
         return 1
     for m in board.open_mentions(tid):
@@ -492,8 +492,7 @@ def cmd_run(args) -> int:
     print(f"\n== stopped: {reason}")
     for p in board.proposals(int(t["id"]), status="open"):
         print(f"   awaiting you: #{p['id']} {p['title']}")
-        h = p['ref'] or p['id']
-        print(f"   mooting approve {h} -m '...'   |   mooting reject {h} -m '...'")
+        print(f"   mooting approve {p['id']} -m '...'   |   mooting reject {p['id']} -m '...'")
     return 0
 
 

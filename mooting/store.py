@@ -277,7 +277,6 @@ class Store:
                                    ("topics", "room_id", "INTEGER"),
                                    ("pairings", "ref", "TEXT"),
                                    ("agents", "tg_user_id", "TEXT"),
-                                   ("proposals", "ref", "TEXT"),
                                    ("mentions", "asking", "INTEGER NOT NULL DEFAULT 1"),
                                    ("tasks", "base_sha", "TEXT")):
             cols = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
@@ -290,11 +289,10 @@ class Store:
         # Every open, not only when the column is added: a request with no handle
         # cannot be answered, and one can arrive that way from an older board or
         # a path that forgot to set it. The table is small and this is idempotent.
-        for table in ("pairings", "proposals"):
-            for row in self._conn.execute(
-                    f"SELECT id FROM {table} WHERE ref IS NULL OR ref = ''").fetchall():
-                self._conn.execute(f"UPDATE {table} SET ref = ? WHERE id = ?",
-                                   (secrets.token_hex(3), row["id"]))
+        for row in self._conn.execute(
+                "SELECT id FROM pairings WHERE ref IS NULL OR ref = ''").fetchall():
+            self._conn.execute("UPDATE pairings SET ref = ? WHERE id = ?",
+                               (secrets.token_hex(3), row["id"]))
 
     def _backfill_asking(self) -> None:
         """Decide, for mentions written before the column existed, which were asks.
@@ -1424,7 +1422,6 @@ class Store:
     # ---------------------------------------------------------------- proposals
 
     def propose(self, topic_id: int, author: str, title: str, body: str) -> int:
-        ref = secrets.token_hex(3)
         with self.tx() as c:
             cur = c.execute(
                 "INSERT INTO messages (topic_id, author, kind, body) VALUES (?,?,'propose',?)",
@@ -1432,28 +1429,20 @@ class Store:
             )
             msg_id = int(cur.lastrowid)
             cur = c.execute(
-                """INSERT INTO proposals (topic_id, message_id, author, title, body, ref)
-                   VALUES (?,?,?,?,?,?)""",
-                (topic_id, msg_id, author, title, body, ref),
+                """INSERT INTO proposals (topic_id, message_id, author, title, body)
+                   VALUES (?,?,?,?,?)""",
+                (topic_id, msg_id, author, title, body),
             )
             pid = int(cur.lastrowid)
             c.execute("UPDATE messages SET proposal_id = ? WHERE id = ?", (pid, msg_id))
             c.execute("UPDATE seats SET turns_used = turns_used + 1 WHERE topic_id = ? AND agent = ?",
                       (topic_id, author))
             self._emit(c, topic_id, "proposal", author,
-                       {"proposal_id": pid, "ref": ref, "title": title,
-                        "action": "opened"})
+                       {"proposal_id": pid, "title": title, "action": "opened"})
         return pid
 
-    def proposal(self, pid) -> sqlite3.Row:
-        """A proposal by its handle or its number.
-
-        Both, because the number is what every existing board, message and link
-        already carries, and the handle is what a person should be typing next to
-        a decision that cannot be undone.
-        """
-        row = self.q1("SELECT * FROM proposals WHERE id = ? OR ref = ?",
-                      (pid, str(pid).strip().lower()))
+    def proposal(self, pid: int) -> sqlite3.Row:
+        row = self.q1("SELECT * FROM proposals WHERE id = ?", (pid,))
         if row is None:
             raise StoreError(f"no such proposal: {pid}")
         return row
