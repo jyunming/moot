@@ -603,7 +603,9 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
         message died in the constructor and the room answered nothing at all.
         Not even `/topic new`, which was the one way out.
         """
-        slug = where.get(str(chat_id), topic)
+        slug = where.get(str(chat_id))
+        if slug is None:
+            slug = store.room_topic("telegram", str(chat_id)) or topic
         if slug is None:
             return None
         try:
@@ -1014,6 +1016,7 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             except StoreError:
                 return await call.answer("that topic is gone", show_alert=True)
             where[str(chat_id)] = t["slug"]
+            store.set_room_topic(store.ensure_room("telegram", str(chat_id)), t["slug"])
             await call.answer(f"now on {t['slug']}")
             return await send_picker(chat_id, message_id=call.message.message_id)
 
@@ -1109,9 +1112,13 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             return await say_proposal(msg.chat.id, pr)
 
         slug = topic_here(msg.chat.id)
-        if not slug and store.topics() and not msg.text.strip().lower().startswith("/topic"):
-            # This chat has nowhere to post yet. Offering the councils that
-            # exist beats an error that asks for a slug somebody has to type.
+        if not slug and store.topics() and not msg.text.strip().startswith("/"):
+            # Something to post and nowhere to post it. Offering the councils
+            # that exist beats an error that asks for a slug somebody has to
+            # type -- but only for talk. A command answers for itself: hijacking
+            # `/team` into the topic list is how this looked broken rather than
+            # empty, and every command that does not need a topic was caught by
+            # it after a restart forgot where the room was standing.
             return await send_picker(msg.chat.id)
         if slug:
             # Pairing says they may take part; taking part needs a seat. Without
@@ -1129,6 +1136,8 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             # anybody in the room lands on the same topic.
             if board.topic:
                 where[str(msg.chat.id)] = board.topic
+                store.set_room_topic(store.ensure_room("telegram", str(msg.chat.id)),
+                                     board.topic)
         finally:
             board.close()
         if out:

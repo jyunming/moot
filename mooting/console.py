@@ -226,8 +226,12 @@ class Console:
 
     def _require_topic(self) -> bool:
         if self.topic_id is None:
-            self.emit(f"{DIM}no topic yet — /new <what you want to discuss>"
-                      f"{', or /topic <slug>' if self.store.topics() else ''}{RESET}")
+            # `/new` moved under `/topic` and this line did not follow it, so
+            # the one message a person sees when they have no topic named a
+            # command that answers "unknown".
+            self.emit(f"{DIM}no topic yet — /topic new <what you want to discuss>"
+                      f"{', or /topic to pick one' if self.store.topics() else ''}"
+                      f"{RESET}")
             return False
         return True
 
@@ -1489,7 +1493,7 @@ class Console:
     def run(self) -> int:
         self.emit(BANNER)
         if self.topic is None:
-            self.emit(f"{DIM}no topic yet — /new <slug> <title> to start one{RESET}")
+            self.emit(f"{DIM}no topic yet — /topic new <what you want to discuss>{RESET}")
         else:
             self.emit(f"{BOLD}{self.topic['title']}{RESET}  {DIM}(`{self.topic['slug']}`, "
                       f"{self.topic['status']}, effort {self.effort()}){RESET}")

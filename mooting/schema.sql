@@ -235,6 +235,10 @@ CREATE TABLE IF NOT EXISTS rooms (
     channel     TEXT NOT NULL DEFAULT 'telegram',   -- telegram | local
     chat_id     TEXT NOT NULL,
     label       TEXT NOT NULL DEFAULT '',
+    -- Where this room is standing. Held on the board rather than in the bot,
+    -- because a bot restart forgot it and the room then answered every command
+    -- with the topic list instead of doing what was asked.
+    topic       TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(channel, chat_id)
 );

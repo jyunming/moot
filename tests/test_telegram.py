@@ -859,3 +859,45 @@ def test_a_terminal_session_has_a_room_of_its_own(tmp_path):
         assert c.store.room_team(c.store.ensure_room("telegram", "-100111")) == []
     finally:
         c.store.close()
+
+
+def test_a_command_is_not_a_lost_user(tmp_path):
+    """A chat with no topic answered every command with the topic list.
+
+    Reported from a phone: `/team` came back "This chat is not on a topic yet"
+    and a list of topics to tap. The list is right for somebody with something to
+    say and nowhere to say it. A command answers for itself.
+    """
+    from mooting.telegram import wants_picker
+
+    # Only the bare topic commands ask for the list.
+    assert wants_picker("/topic") and wants_picker("/topics")
+    for command in ("/team", "/effort", "/me Ege", "/seats", "/help", "/rounds 5"):
+        assert not wants_picker(command), command
+
+
+def test_a_room_remembers_its_topic_across_a_restart(tmp_path):
+    """`where` lived in the bot, so restarting it lost the room's place — and
+    then every command was answered with the topic list instead."""
+    from mooting.store import connect
+
+    db = tmp_path / "board.db"
+    s = connect(db, init=True)
+    s.add_agent("Jeremy", "human")
+    s.add_agent("Santa", "claude", driver="spawn")
+    s.open_topic("engine", "Which engine", "b", "Jeremy", seats=("Jeremy", "Santa"))
+    rid = s.ensure_room("telegram", "-100111")
+
+    assert s.room_topic("telegram", "-100111") is None
+    s.set_room_topic(rid, "engine")
+    s.close()
+
+    # A new process, which is what a restart is.
+    again = connect(db)
+    try:
+        assert again.room_topic("telegram", "-100111") == "engine"
+        # and a topic that has gone since is not offered back
+        again.clear_topics()
+        assert again.room_topic("telegram", "-100111") is None
+    finally:
+        again.close()

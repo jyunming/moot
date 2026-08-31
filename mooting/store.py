@@ -271,6 +271,7 @@ class Store:
         for table, column, ddl in (("topics", "mode", "TEXT NOT NULL DEFAULT 'debate'"),
                                    ("topics", "effort", "TEXT"),
                                    ("topics", "chair", "TEXT"),
+                                   ("rooms", "topic", "TEXT"),
                                    ("mentions", "asking", "INTEGER NOT NULL DEFAULT 1"),
                                    ("tasks", "base_sha", "TEXT")):
             cols = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
@@ -826,6 +827,22 @@ class Store:
 
     def rooms(self) -> list[sqlite3.Row]:
         return self.q("SELECT * FROM rooms ORDER BY id")
+
+    def set_room_topic(self, room_id: int, slug: str | None) -> None:
+        """Remember where a room is standing, across restarts."""
+        with self.tx() as c:
+            c.execute("UPDATE rooms SET topic = ? WHERE id = ?", (slug, room_id))
+
+    def room_topic(self, channel: str, chat_id: str) -> str | None:
+        """The topic a room was left on, if it is still there."""
+        row = self.room(channel, chat_id)
+        if row is None or not row["topic"]:
+            return None
+        try:
+            self.topic(row["topic"])
+        except StoreError:
+            return None
+        return row["topic"]
 
     def room_team(self, room_id: int) -> list[str]:
         """The seats a meeting opened in this room starts with."""
