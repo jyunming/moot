@@ -154,6 +154,11 @@ question to one seat and the others wait for the answer.
 
 #### Once it is running
 
+- `/topics` lists every council as buttons, one per row, with the one this chat
+  is on marked. Tap another and the room moves to it. The same list appears if
+  you send anything while the chat is not on a topic yet, so a slug never has to
+  be typed from memory on a phone. `/topic new`, `/topic agenda` and the rest
+  still mean what they always did.
 - A proposal arrives with **Approve / Reject** buttons. The reason is the reply
   it asks you for, and the button carries the proposal id, so a sign-off cannot
   land on the wrong one.
