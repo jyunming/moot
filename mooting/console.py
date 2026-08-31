@@ -41,10 +41,11 @@ import shlex
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
-from .store import (MENTION_RE, Store, StoreError, agenda_text, connect,
-                    slugify, split_points)
+from .store import (MENTION_RE, NotAuthorised, Store, StoreError, agenda_text,
+                    connect, slugify, split_points)
 
 #: CLIs a seat can be created against from inside the session.
 AGENT_KINDS = frozenset({"claude", "codex", "copilot", "gemini", "agy"})
@@ -184,6 +185,10 @@ class Console:
         self.me = me
         self.stop = threading.Event()
         self.driving = threading.Event()
+        #: Identifies this session to the board's drive claim. Two `mooting
+        #: console` processes on one board are two processes, so "am I already
+        #: driving" cannot live in either of them.
+        self._session_id = f"{os.getpid()}-{uuid.uuid4().hex[:6]}"
         #: Posting wakes the council without you typing /run. This is the whole
         #: difference between a meeting and a batch job: you say something, they
         #: pick it up, you see the replies, you answer again. /auto off restores
@@ -247,7 +252,7 @@ class Console:
                 time.sleep(1.0)
             store.close()
             return
-        for m in store.transcript(self.topic_id)[-6:]:
+        for m in store.transcript(self.topic_id, limit=6, newest=True):
             self.emit(f"\n{DIM}{m['author']}{RESET}  {m['body'].strip()[:400]}")
         for a in store.open_mentions(self.topic_id, self.me):
             self.emit(_ask_banner(a["asker"], a["question"]))
@@ -270,6 +275,15 @@ class Console:
         from .supervisor import Caps, Supervisor
 
         store = connect(self.db)
+        # The claim lives on the board because that is the only thing two console
+        # processes share. Guarding with `self.driving` alone let a second session
+        # start a second supervisor and wake every seat twice on one budget.
+        holder = store.take_drive(self.topic_id, self._session_id)
+        if holder is not None:
+            self.emit(f"{YELLOW}— already being driven by another session{RESET}")
+            store.close()
+            self.driving.clear()
+            return
         try:
             if store.topic(self.topic_id)["status"] == "paused":
                 store.set_topic_status(self.topic_id, "open", self.me, "resumed from console")
@@ -288,6 +302,7 @@ class Console:
         except Exception as exc:
             self.emit(f"\n{RED}— council failed: {exc}{RESET}")
         finally:
+            store.release_drive(self.topic_id, self._session_id)
             store.close()
             self.driving.clear()
 
@@ -310,6 +325,10 @@ class Console:
             "effort": self._effort, "asks": self._asks, "nudge": self._nudge,
             "auto": self._auto,
             "proposals": self._proposals, "seats": self._seats, "topic": self._topic,
+            # Advertised in the help, in the README's own transcript and in the
+            # chat menu, and reachable from none of them: it was only ever wired
+            # into the `/topic` verb map, which does not list it either.
+            "attach": self._attach,
             "tasks": self._tasks,
             "reset": self._reset,
             "capability": self._capability,
@@ -379,7 +398,7 @@ class Console:
             # running away unattended, not to make you ask permission to continue
             # a conversation you are sitting in -- so one round is granted, and
             # only one, so it still cannot run off on its own.
-            self.store.grant_rounds(self.topic_id, 1)
+            self.store.grant_rounds(self.topic_id, 1, self.me)
             topic = self.store.topic(self.topic_id)
             self.emit(f"{DIM}was out of rounds — granted one more "
                       f"(round {topic['round'] + 1}/{topic['max_rounds']}); "
@@ -721,9 +740,9 @@ class Console:
         n = int(digits)
         try:
             if add:
-                self.store.grant_rounds(self.topic_id, n)
+                self.store.grant_rounds(self.topic_id, n, self.me)
             else:
-                self.store.set_rounds(self.topic_id, n)
+                self.store.set_rounds(self.topic_id, n, self.me)
         except StoreError as exc:
             self.emit(f"{RED}{exc}{RESET}")
             return
@@ -909,7 +928,7 @@ class Console:
 
         if not confirmed:
             self.emit(f"{YELLOW}delete `{t['slug']}` — {t['title']}?{RESET}")
-            self.emit(f"  {len(self.store.transcript(tid))} message(s), "
+            self.emit(f"  {self.store.message_count(tid)} message(s), "
                       f"{len(self.store.tasks(tid))} task(s), "
                       f"{len(self.store.proposals(tid))} proposal(s)")
             for w in trees:
@@ -960,7 +979,8 @@ class Console:
     #: Everything you can do *to* a topic, reachable as `/topic <verb>`. Kept in
     #: one place so the session has one obvious noun to ask about rather than six
     #: unrelated verbs at the top level.
-    TOPIC_VERBS = ("new", "switch", "rename", "agenda", "mode", "manager", "rm", "list")
+    TOPIC_VERBS = ("new", "switch", "rename", "agenda", "chair", "mode", "manager",
+                   "rm", "list")
 
     def _topic(self, rest: str) -> None:
         """`/topic` is the noun; the verbs live under it.
@@ -976,8 +996,9 @@ class Console:
             return self._topic_overview()
         if verb in self.TOPIC_VERBS:
             return {"new": self._new, "switch": self._switch, "rename": self._rename,
-                    "agenda": self._agenda, "attach": self._attach, "mode": self._mode,
-                    "manager": self._manager, "rm": self._rm}[verb](tail.strip())
+                    "agenda": self._agenda, "mode": self._mode,
+                    "chair": self._chair, "manager": self._manager,
+                    "rm": self._rm}[verb](tail.strip())
         # Not guessing that an unknown word is a slug. `/topic mode` would have
         # been ambiguous forever, and a wrong guess here silently switches you
         # somewhere instead of saying it did not understand.
@@ -1314,6 +1335,34 @@ class Console:
         self.emit(f"{YELLOW}{agent} may now edit files in {path.resolve()}{RESET}")
         self.emit(f"{DIM}only for a task you have approved on a work topic, and only "
                   f"in its own git worktree{RESET}")
+
+    def _chair(self, rest: str) -> None:
+        """Who signs off here. Anybody may call a meeting and argue in it.
+
+        Kept separate from `manager`, which is about work: a manager splits a goal
+        into tasks and reviews what comes back, and may be an agent. A chair is
+        always a person, because the whole point is that one is answerable.
+        """
+        if not self._require_topic():
+            return
+        seated = self.store.chair(self.topic_id)
+        who = rest.strip().lstrip("@")
+        if not who:
+            if seated is None:
+                self.emit(f"  {DIM}nobody chairs this meeting — the person who "
+                          f"opened it is no longer on the board, so any person "
+                          f"may sign off{RESET}")
+            else:
+                self.emit(f"  {BOLD}{seated}{RESET} chairs this meeting")
+            self.emit(f"  {DIM}/topic chair <name> to hand it over{RESET}")
+            return
+        try:
+            self.store.set_chair(self.topic_id, who, self.me)
+        except (StoreError, NotAuthorised) as exc:
+            self.emit(f"{RED}{exc}{RESET}")
+            return
+        self.emit(f"{DIM}{who} now chairs this meeting{RESET}")
+        self.on_topic_change()
 
     def _manager(self, rest: str) -> None:
         if not self._require_topic():

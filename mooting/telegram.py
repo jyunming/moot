@@ -34,14 +34,20 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import os
 import pathlib
 import re
 import shutil
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 
 log = logging.getLogger("mooting.telegram")
+
+#: This bot process, to the board's drive claim. The `running` table below is
+#: this process only, and a board can have a bot and a console on it at once.
+SESSION = f"chat-{os.getpid()}-{uuid.uuid4().hex[:6]}"
 
 #: Telegram hard ceiling for one message.
 LIMIT = 4096
@@ -237,7 +243,14 @@ class ChatBoard:
 
     def __init__(self, db, topic, me: str):
         from .console import Console
-        self.console = Console(db, topic, me)
+        from .store import StoreError
+        try:
+            self.console = Console(db, topic, me)
+        except StoreError:
+            # Second line for the same failure `topic_here` guards: a session
+            # with no topic still takes `/topic new`, and one that cannot be
+            # built takes nothing at all.
+            self.console = Console(db, None, me)
         self.console.auto = False        # the chat drives explicitly, with /run
         self.lines: list[str] = []
         self.console.emit = self.lines.append
@@ -276,6 +289,8 @@ HELP = (
     "<b>talk</b>\n"
     "  any message posts as you, and answers anything asked of you\n"
     "  <code>@Santa what about the windows?</code> asks one seat\n\n"
+    "<b>move around</b>\n"
+    "  <code>/topics</code> — every council as buttons; tap one to come here\n\n"
     "<b>run it</b>\n"
     "  <code>/topic new should we cap retries?</code>\n"
     "  <code>/topic agenda cap; jitter; who owns the runbook</code>\n"
@@ -296,16 +311,34 @@ HELP = (
 #: somebody who has not read any of this.
 MENU = [
     ("pair", "join this council, or approve someone who asked"),
-    ("topic", "new <question> · agenda <a; b> · switch <slug> · list"),
+    ("topics", "every council, as buttons — tap one to move this chat to it"),
+    ("topic", "new <question> · agenda <a; b> · chair <name> · list"),
+    ("seats", "who is here, and how many turns they have left"),
+    ("me", "<name> — what the council calls you"),
     ("run", "wake the seats and hold a round"),
     ("stop", "stop after the turn in flight"),
-    ("seats", "who is here, and how many turns they have left"),
+    ("nudge", "<seat> — wake one of them by hand"),
+    ("effort", "low · medium · high — how long they think before answering"),
+    ("rounds", "<n> — grant the council more rounds on this topic"),
     ("proposals", "what is waiting on your sign-off"),
     ("asks", "questions the council has put to you"),
+    ("tasks", "the work plan and where each task has got to"),
     ("attach", "feed a document to the council"),
+    ("show", "<id> — a message in full, however far back it scrolled"),
     ("minutes", "the meeting as a file; `minutes decisions` for the decisions"),
+    ("conclude", "<closing words> — close the meeting and write it up"),
+    ("reopen", "resume a meeting you concluded"),
     ("help", "all of the above, with examples"),
 ]
+
+#: Deliberately absent from the menu, though both still work when typed.
+#: `reset` clears every topic on the board and must not be one tap from a thumb
+#: — it has already been run by accident here. `capability` hands a seat the
+#: right to edit files, which is the one escalation in this project and should
+#: be a considered gesture rather than a menu item. `approve` and `reject` are
+#: absent for a different reason: the buttons on a proposal carry its id, and
+#: typing `/approve 3` from memory is how a sign-off lands on the wrong one.
+OFF_MENU = ("reset", "capability", "approve", "reject", "quit")
 
 
 def explain_start_failure(exc) -> list[str] | None:
@@ -370,6 +403,60 @@ def proposal_ref(text: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+#: Switching topics is the other gesture a thumb gets wrong. `/topic switch
+#: <slug>` asks somebody to retype an identifier from memory on a phone
+#: keyboard, and a near miss moves the whole room somewhere nobody meant.
+PICK_PREFIX = "pick"
+
+
+def pick_callback(topic_id: int) -> str:
+    data = f"{PICK_PREFIX}:{int(topic_id)}"
+    if len(data.encode("utf-8")) > 64:
+        raise ValueError("callback_data over Telegram's 64-byte limit")
+    return data
+
+
+def parse_pick(data: str) -> int | None:
+    """Topic id behind a picker button, or None if this is not one of ours."""
+    parts = (data or "").split(":")
+    if len(parts) != 2 or parts[0] != PICK_PREFIX or not parts[1].isdigit():
+        return None
+    return int(parts[1])
+
+
+def wants_picker(text: str) -> bool:
+    """`/topic` or `/topics` with nothing after it.
+
+    A verb after it still means what it always did, so `/topic new ...` and
+    `/topic agenda ...` keep working and go to the same console dispatch as
+    every other command.
+    """
+    return bool(re.fullmatch(r"/topics?(?:@\S+)?", (text or "").strip(), re.I))
+
+
+#: One topic per row: a thumb misses a shared row, and switching to the wrong
+#: council is the mistake this exists to prevent.
+PICKER_LIMIT = 12
+
+
+def picker_rows(topics, current: str | None) -> list[tuple[str, int]]:
+    """`(button label, topic id)` for a tap-to-switch list.
+
+    Pure, so it can be tested without faking aiogram.
+    """
+    marks = {"paused": "⏸", "resolved": "✓", "aborted": "✕"}
+    rows = []
+    for t in topics[:PICKER_LIMIT]:
+        here = "● " if t["slug"] == current else ""
+        title = " ".join((t["title"] or t["slug"]).split())
+        if len(title) > 34:
+            title = title[:34].rsplit(" ", 1)[0] + "…"
+        label = " ".join(bit for bit in (here.strip(), marks.get(t["status"], ""),
+                                         title) if bit)
+        rows.append((label, int(t["id"])))
+    return rows
+
+
 def rule_callback(action: str, pid: int) -> str:
     if action not in {"ok", "no", "full"}:
         raise ValueError(f"unknown ruling action {action!r}")
@@ -426,24 +513,6 @@ def event_text(store, ev) -> str | None:
     return None
 
 
-HELP = (
-    "<b>mooting</b> — a council in this chat\n\n"
-    "<b>talk</b>\n"
-    "  any message posts as you, and answers anything asked of you\n"
-    "  <code>@Santa what about the windows?</code> asks one seat\n\n"
-    "<b>run it</b>\n"
-    "  <code>/topic new should we cap retries?</code>\n"
-    "  <code>/topic agenda cap; jitter; who owns the runbook</code>\n"
-    "  <code>/run</code> · <code>/stop</code> · <code>/seats</code> "
-    "· <code>/proposals</code>\n\n"
-    "<b>who may speak</b>\n"
-    "  <code>/pair list</code> · <code>/pair approve &lt;id&gt;</code>\n\n"
-    "<b>rule on it</b>\n"
-    "  a proposal arrives with Approve / Reject buttons; the reason\n"
-    "  is the reply it asks you for"
-)
-
-
 def run(db, *, bot_token: str, chats, human: str, topic=None,
         remember: bool = False) -> int:        # pragma: no cover - needs a token
     """Long-poll Telegram and drive a council from a chat.
@@ -477,7 +546,9 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
     #: is their job.
     claim = {"code": None if store.pairings("approved") else secrets.token_hex(3)}
     #: Which topic each chat is standing on; a council spans many messages.
-    where: dict[str, str] = {}
+    #: Where each chat is standing. `None` means the topic it was on has gone,
+    #: which is different from never having had one only in how it got here.
+    where: dict[str, str | None] = {}
     #: One council per topic. Two people pressing /run must not wake every seat
     #: twice on one budget.
     running: dict[int, "asyncio.Task"] = {}
@@ -523,7 +594,23 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
         return (paired & chats) if chats else paired
 
     def topic_here(chat_id):
-        return where.get(str(chat_id), topic)
+        """The slug this chat is standing on, if it is still there.
+
+        A topic can go away under a chat -- `/reset`, or `/topic rm` from the
+        terminal. The chat went on pointing at it, and building the session for
+        the next message then raised before any command was dispatched, so every
+        message died in the constructor and the room answered nothing at all.
+        Not even `/topic new`, which was the one way out.
+        """
+        slug = where.get(str(chat_id), topic)
+        if slug is None:
+            return None
+        try:
+            store.topic(slug)
+        except StoreError:
+            where[str(chat_id)] = None
+            return None
+        return slug
 
     @dp.message(Command("start", "help"))
     async def on_help(msg: Message):
@@ -781,6 +868,10 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
         task = running.get(tid)
         if task is not None and not task.done():
             return await say(msg.chat.id, "Already running. `/stop` to stop it.")
+        holder = store.take_drive(tid, SESSION)
+        if holder is not None:
+            return await say(msg.chat.id,
+                             "Already being driven from another session.")
 
         from .drivers.registry import build_drivers
         from .supervisor import Caps, Supervisor
@@ -805,6 +896,8 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             except Exception as exc:
                 log.exception("council on %s failed", slug)
                 await say(msg.chat.id, f"council failed: {exc}")
+            finally:
+                store.release_drive(tid, SESSION)
 
         running[tid] = asyncio.create_task(drive())
         await say(msg.chat.id,
@@ -866,6 +959,38 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             log.warning("proposal keyboard failed: %s", exc)
             await say(chat_id, text)
 
+    async def send_picker(chat_id, *, message_id: int | None = None) -> None:
+        """The topic list, as one button per row.
+
+        Sent fresh, or edited in place after a tap so the same message keeps
+        working. A chat scrolls, and hunting back up for the picker is the
+        thing a phone is worst at.
+        """
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+        rows = picker_rows(store.topics(), topic_here(chat_id))
+        if not rows:
+            return await say(chat_id, "No topics yet — `/topic new <question>`.")
+        keys = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=label, callback_data=pick_callback(tid))]
+            for label, tid in rows
+        ])
+        here = topic_here(chat_id)
+        text = (f"<b>This chat is on</b> <code>{html.escape(here)}</code>"
+                if here else "<b>This chat is not on a topic yet</b>")
+        text += "\n\nTap one to move the room to it."
+        try:
+            if message_id is not None:
+                return await bot.edit_message_text(
+                    text, chat_id=chat_id, message_id=message_id,
+                    reply_markup=keys, parse_mode=ParseMode.HTML)
+            await bot.send_message(chat_id, text, reply_markup=keys,
+                                   parse_mode=ParseMode.HTML)
+        except Exception as exc:
+            # Telegram refuses an edit that changes nothing, and a picker that
+            # cannot redraw must not take the tap down with it.
+            log.warning("topic picker: %s", exc)
+
     @dp.callback_query()
     async def on_rule(call):
         """A button press. The presser's own seat is what rules.
@@ -875,17 +1000,32 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
         """
         from aiogram.types import ForceReply
 
+        chat_id = call.message.chat.id
+        picked = parse_pick(call.data or "")
+        if picked is not None:
+            if not allowed(chat_id):
+                return await call.answer("not this chat", show_alert=True)
+            if not store.seat_for_chat(chat_id, call.from_user.id):
+                return await call.answer(
+                    "You are not paired here — send /pair first.", show_alert=True)
+            try:
+                t = store.topic(picked)
+            except StoreError:
+                return await call.answer("that topic is gone", show_alert=True)
+            where[str(chat_id)] = t["slug"]
+            await call.answer(f"now on {t['slug']}")
+            return await send_picker(chat_id, message_id=call.message.message_id)
+
         parsed = parse_rule(call.data or "")
         if parsed is None:
             return await call.answer()
         what, pid = parsed
-        chat_id = call.message.chat.id
         if not allowed(chat_id):
             return await call.answer("not this chat", show_alert=True)
 
         seat = store.seat_for_chat(chat_id, call.from_user.id)
         if not seat:
-            # Pairing is the fence, and a button does not get to skip it.
+            # Pairing says who may take part, and a button does not get to skip it.
             return await call.answer(
                 "You are not paired here — send /pair first.", show_alert=True)
 
@@ -953,6 +1093,10 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             return await say(msg.chat.id,
                              f"You are not paired here. Request `{pid}` is "
                              f"waiting for a member to approve it.")
+        # `/topic` with no verb is somebody asking where they are and where
+        # else they could be. That is a list to tap, not a slug to retype.
+        if wants_picker(msg.text):
+            return await send_picker(msg.chat.id)
         # Ask for a proposal by number and it comes back with its buttons,
         # whenever it was opened.
         want = proposal_ref(msg.text)
@@ -964,6 +1108,10 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             return await say_proposal(msg.chat.id, pr)
 
         slug = topic_here(msg.chat.id)
+        if not slug and store.topics() and not msg.text.strip().lower().startswith("/topic"):
+            # This chat has nowhere to post yet. Offering the councils that
+            # exist beats an error that asks for a slug somebody has to type.
+            return await send_picker(msg.chat.id)
         if slug:
             # Pairing says they may take part; taking part needs a seat. Without
             # this a second person in the room could rule on a plan and not be

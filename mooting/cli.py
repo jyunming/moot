@@ -92,7 +92,23 @@ def _human(board: Store, name: str | None) -> str:
         humans = [a["name"] for a in board.agents() if a["kind"] == "human"]
         if len(humans) == 1:
             return humans[0]
-        raise SystemExit("who are you? pass --as <name> or set MOOTING_HUMAN")
+        if not humans:
+            raise SystemExit(
+                "no person holds a seat on this board yet — `mooting setup` seats you.")
+        # `--as` is a global option, so it belongs before the command. The old
+        # message said to pass it and not where, and argparse answers
+        # `mooting telegram --as Jeremy` with "unrecognized arguments", which
+        # reads like the flag does not exist.
+        #
+        # Pairing a second person is what usually gets somebody here: a board
+        # with one person answers this on its own, so the command that worked
+        # yesterday stops the day a colleague joins.
+        raise SystemExit(
+            "who are you? more than one person holds a seat on this board:\n"
+            f"  {', '.join(humans)}\n"
+            "Say which, before the command:\n"
+            f"  mooting --as {humans[0]} <command>\n"
+            "or set MOOTING_HUMAN once for the whole session.")
     if not board.is_human(who):
         raise SystemExit(f"{who!r} is not a human seat; agent seats cannot use this command")
     return who
@@ -245,7 +261,7 @@ def cmd_topic_rm(args) -> int:
     trees = board.orphan_worktrees(int(t["id"]))
     if not args.yes:
         print(f"would delete `{t['slug']}` — {t['title']}")
-        print(f"  {len(board.transcript(int(t['id'])))} message(s), "
+        print(f"  {board.message_count(int(t['id']))} message(s), "
               f"{len(board.tasks(int(t['id'])))} task(s), "
               f"{len(board.proposals(int(t['id'])))} proposal(s)")
         for w in trees:
@@ -308,7 +324,7 @@ def cmd_show(args) -> int:
     for s in board.seats(t["id"]):
         print(f"  {s['agent']:<10} {s['kind']:<9} {s['state']:<8} {s['turns_used']}/{s['max_turns']}")
     print("\n" + "-" * 60 + "\n")
-    for m in board.transcript(t["id"]):
+    for m in board.transcript(t["id"], limit=None):
         tag = "" if m["kind"] == "say" else f" [{m['kind']}]"
         print(f"#{m['id']} {m['author']}{tag}  {m['created_at']}")
         print(m["body"].strip() + "\n")

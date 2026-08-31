@@ -266,8 +266,11 @@ class Store:
         # exists, so new columns are migrated explicitly. Cheap and idempotent.
         # `asking` defaults to 1 so rows written before the distinction existed
         # keep blocking, which is what the topics holding them expect.
+        # `chair` needs no backfill: NULL falls back to `opened_by`, so every
+        # topic on an existing board keeps a chair without one being invented.
         for table, column, ddl in (("topics", "mode", "TEXT NOT NULL DEFAULT 'debate'"),
                                    ("topics", "effort", "TEXT"),
+                                   ("topics", "chair", "TEXT"),
                                    ("mentions", "asking", "INTEGER NOT NULL DEFAULT 1"),
                                    ("tasks", "base_sha", "TEXT")):
             cols = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
@@ -379,7 +382,12 @@ class Store:
         ("proposals", "author"), ("proposals", "decided_by"),
         ("votes", "agent"), ("wakes", "agent"),
         ("tasks", "assignee"), ("tasks", "created_by"),
-        ("topics", "opened_by"),
+        ("topics", "opened_by"), ("topics", "chair"),
+        # `pairings.seat` carries a real foreign key, so leaving it behind did not
+        # orphan a row quietly -- it failed the whole rename at COMMIT. `/me` in a
+        # terminal worked and `/me` in a chat answered "FOREIGN KEY constraint
+        # failed", because only a paired person has a row here.
+        ("pairings", "seat"),
     )
 
     def rename_agent(self, old: str, new: str) -> None:
@@ -429,7 +437,19 @@ class Store:
                 f"{name!r} is on {len(owns)} task(s) (#{owns[0]['id']} "
                 f"{owns[0]['title']!r}...). Delete those topics first, or leave the "
                 f"seat registered -- its work log refers to it.")
+        # `pairings.seat` is a foreign key too, and removing a seat that somebody
+        # is paired to raised the same raw IntegrityError. Their access goes with
+        # the seat -- a pairing onto a seat that no longer exists grants nothing
+        # and cannot be repaired from a chat -- and the count says so rather than
+        # letting it happen quietly.
+        counts["pairings"] = self.q1(
+            "SELECT COUNT(*) c FROM pairings WHERE seat = ?", (name,))["c"]
         with self.tx() as c:
+            # Leaving the chair pointing at somebody who is gone made the topic
+            # undecidable: not the chair for everyone else, not a human seat for
+            # the name itself. Clearing it falls back to whoever opened it.
+            c.execute("UPDATE topics SET chair = NULL WHERE chair = ?", (name,))
+            c.execute("DELETE FROM pairings WHERE seat = ?", (name,))
             c.execute("DELETE FROM seats WHERE agent = ?", (name,))
             c.execute("DELETE FROM agents WHERE name = ?", (name,))
         return counts
@@ -504,7 +524,7 @@ class Store:
             return self.q("SELECT * FROM topics WHERE status = ? ORDER BY id DESC", (status,))
         return self.q("SELECT * FROM topics ORDER BY id DESC")
 
-    def set_rounds(self, topic_id: int, n: int) -> None:
+    def set_rounds(self, topic_id: int, n: int, actor: str) -> None:
         """Make this topic run to `n` rounds.
 
         Turns move with it. A seat speaks at most once a round, so a seat capped
@@ -512,7 +532,12 @@ class Store:
         meeting that is still running -- and from the outside that looks like the
         agent failing, not like a budget. Never reduces a budget somebody raised
         on purpose: rounds are the binding cap anyway.
+
+        A person only. A cap that an agent could raise is not a cap, and this one
+        exists to stop a council spending a subscription with nobody watching.
         """
+        if not self.is_human(actor):
+            raise NotAuthorised(f"{actor!r} may not change the round budget")
         if n < 1:
             raise StoreError("a topic runs for at least one round")
         with self.tx() as c:
@@ -520,13 +545,15 @@ class Store:
             c.execute("UPDATE seats SET max_turns = MAX(max_turns, ?) WHERE topic_id = ?",
                       (n, topic_id))
 
-    def grant_rounds(self, topic_id: int, n: int) -> None:
-        """More rounds, and the per-seat turns to use them.
+    def grant_rounds(self, topic_id: int, n: int, actor: str) -> None:
+        """More rounds, and the per-seat turns to use them. A person only.
 
         Raising one without the other is the trap: a seat that has spent its turns
         stays capped however many rounds you add, so the council looks alive and
         says nothing.
         """
+        if not self.is_human(actor):
+            raise NotAuthorised(f"{actor!r} may not grant more rounds")
         with self.tx() as c:
             c.execute("UPDATE topics SET max_rounds = max_rounds + ? WHERE id = ?",
                       (n, topic_id))
@@ -545,6 +572,10 @@ class Store:
         """
         if not self.is_human(by):
             raise NotAuthorised(f"{by!r} is not a human seat; only a human closes a meeting")
+        seated = self.chair(topic_id)
+        if seated and by != seated:
+            raise NotAuthorised(
+                f"{by!r} is not the chair of this meeting — {seated} concludes it")
         topic = self.topic(topic_id)
         if topic["status"] in {"resolved", "aborted"}:
             raise StoreError(f"`{topic['slug']}` is already {topic['status']}")
@@ -573,10 +604,53 @@ class Store:
             "AND proposal_id IS NULL ORDER BY id DESC LIMIT 1", (topic_id,))
 
     def set_topic_status(self, topic_id: int, status: str, actor: str, note: str = "") -> None:
+        """Open, pause or close a topic.
+
+        Closing is a decision, so `resolved` and `aborted` need a person, the same
+        as `conclude` and `decide`. Opening and pausing are not: the supervisor
+        parks a topic itself when a cap is reached, which is the whole point of a
+        cap.
+        """
+        if status in {"resolved", "aborted"} and not self.is_human(actor):
+            raise NotAuthorised(f"{actor!r} may not close a topic")
         with self.tx() as c:
             closed = "datetime('now')" if status in {"resolved", "aborted"} else "NULL"
             c.execute(f"UPDATE topics SET status = ?, closed_at = {closed} WHERE id = ?", (status, topic_id))
             self._emit(c, topic_id, "topic", actor, {"action": status, "note": note})
+
+    def chair(self, topic_id: int) -> str | None:
+        """Who signs off here. Whoever opened the meeting, unless it named someone.
+
+        Anybody may call a meeting and argue in it. Closing a proposal and
+        concluding the meeting belong to one person, because "a human decided"
+        says very little when everybody in the room can decide and nobody in
+        particular is answerable for it.
+
+        `None` when nobody named is still on the board. A meeting must not become
+        undecidable because the person who chaired it was removed, so it falls
+        back to the rule that applied before chairs existed: any person may close
+        it. Deleting a seat clears the chair as well, and this is the second line
+        for a board where `opened_by` names somebody long gone.
+        """
+        t = self.topic(topic_id)
+        for candidate in (t["chair"], t["opened_by"]):
+            if candidate and self.is_human(candidate):
+                return candidate
+        return None
+
+    def set_chair(self, topic_id: int, who: str, actor: str) -> None:
+        """Hand the chair over. Only the sitting chair may, and only to a person."""
+        if not self.is_human(who):
+            raise NotAuthorised(
+                f"{who!r} is not a human seat; an agent cannot chair a meeting")
+        seated = self.chair(topic_id)
+        if seated and actor != seated:
+            raise NotAuthorised(f"only {seated} may hand over the chair")
+        if not self.is_human(actor):
+            raise NotAuthorised(f"{actor!r} is not a human seat")
+        with self.tx() as c:
+            c.execute("UPDATE topics SET chair = ? WHERE id = ?", (who, topic_id))
+            self._emit(c, topic_id, "topic", actor, {"action": "chair", "chair": who})
 
     # ----------------------------------------------------------------- settings
 
@@ -1065,11 +1139,44 @@ class Store:
             mention_targets=[target],
         )
 
-    def transcript(self, topic_id: int, after: int = 0, limit: int = 500) -> list[sqlite3.Row]:
+    def transcript(self, topic_id: int, after: int = 0, limit: int | None = 500,
+                   newest: bool = False) -> list[sqlite3.Row]:
+        """Messages after `after`, oldest first. `limit=None` for all of them.
+
+        `newest=True` takes the last `limit` rather than the first. Callers that
+        wanted the tail used to slice the returned list, which is the *oldest*
+        500 messages of the topic -- so once a council passed 500 messages every
+        one of them was showing the tail of the wrong window.
+        """
+        cap = -1 if limit is None else limit
+        if newest:
+            rows = self.q(
+                "SELECT * FROM messages WHERE topic_id = ? AND id > ? ORDER BY id DESC LIMIT ?",
+                (topic_id, after, cap),
+            )
+            return list(reversed(rows))
         return self.q(
             "SELECT * FROM messages WHERE topic_id = ? AND id > ? ORDER BY id LIMIT ?",
-            (topic_id, after, limit),
+            (topic_id, after, cap),
         )
+
+    def messages_by_id(self, ids: Iterable[int | None]) -> list[sqlite3.Row]:
+        """The named messages, oldest first.
+
+        Resolving ids by scanning a `transcript` window meant a message outside
+        that window silently had no body, which is how a seat came to be handed
+        an event it could not read.
+        """
+        wanted = sorted({int(i) for i in ids if i is not None})
+        if not wanted:
+            return []
+        marks = ",".join("?" * len(wanted))
+        return self.q(f"SELECT * FROM messages WHERE id IN ({marks}) ORDER BY id", wanted)
+
+    def message_count(self, topic_id: int) -> int:
+        """How many messages a topic holds. Counting a `transcript` stopped at 500."""
+        return int(self.q1("SELECT COUNT(*) c FROM messages WHERE topic_id = ?",
+                           (topic_id,))["c"])
 
     # ---------------------------------------------------------------- proposals
 
@@ -1148,6 +1255,14 @@ class Store:
                 "Agents may vote (support/object) -- votes are advisory."
             )
         p = self.proposal(pid)
+        # Anybody may call a meeting and argue in it; one person closes it. Without
+        # this, approving somebody into a room handed them the same authority as
+        # the person who opened it, and "a human decided" stopped identifying who.
+        seated = self.chair(int(p["topic_id"]))
+        if seated and decider != seated:
+            raise NotAuthorised(
+                f"{decider!r} is not the chair of this meeting — {seated} signs off "
+                f"here. Anybody may argue; one person closes it.")
         if p["status"] != "open":
             raise StoreError(f"proposal {pid} already {p['status']}")
         status = "approved" if approve else "rejected"
@@ -1186,7 +1301,7 @@ class Store:
         carries a topic_id but no foreign key, so the cascade does not reach it.
         """
         counts = {
-            "messages": len(self.transcript(topic_id)),
+            "messages": self.message_count(topic_id),
             "tasks": len(self.tasks(topic_id)),
             "proposals": len(self.proposals(topic_id)),
         }
@@ -1279,14 +1394,6 @@ class Store:
                       (pid, topic_id))
         return pid
 
-    def release_plan(self, proposal_id: int) -> int:
-        """Turn approved drafts into assigned work. Reached only from `decide`."""
-        with self.tx() as c:
-            cur = c.execute(
-                "UPDATE tasks SET status = 'assigned', updated_at = datetime('now') "
-                "WHERE proposal_id = ? AND status = 'draft'", (proposal_id,))
-            return cur.rowcount
-
     def update_task(self, task_id: int, agent: str, status: str, result: str = "") -> None:
         """A worker reports on its own task; a manager rules on a finished one."""
         t = self.task(task_id)
@@ -1296,8 +1403,14 @@ class Store:
             raise StoreError(f"bad task status {status!r}")
         if status in worker_states and agent != t["assignee"]:
             raise NotAuthorised(f"{agent!r} is not the assignee of task {task_id}")
-        if status in manager_states and not self.is_manager(int(t["topic_id"]), agent):
-            raise NotAuthorised(f"only the manager accepts or rejects task {task_id}")
+        # The chair as well as the manager, because a work topic managed by an
+        # agent otherwise had no route for the person who signed off the plan to
+        # accept what came back.
+        if status in manager_states and not (
+                self.is_manager(int(t["topic_id"]), agent)
+                or agent == self.chair(int(t["topic_id"]))):
+            raise NotAuthorised(
+                f"only the manager or the chair accepts or rejects task {task_id}")
         if t["status"] == "draft":
             raise StoreError(f"task {task_id} is still a draft; the plan needs approving")
         note = f"task #{task_id} [{t['title']}] -> {status}"

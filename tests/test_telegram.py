@@ -7,6 +7,7 @@ wrapper around them.
 
 from __future__ import annotations
 
+import pathlib
 import pytest
 
 from mooting.store import NotAuthorised, StoreError, connect
@@ -552,7 +553,13 @@ def test_a_ruling_from_chat_is_the_pressers_own(board):
     assert board.seat_for_chat("-100", "42") == "jeremy"
     assert board.seat_for_chat("-100", "77") == "alice"
 
-    # alice presses, so alice rules
+    # Jeremy opened this meeting, so alice may argue in it but not close it.
+    with pytest.raises(NotAuthorised):
+        board.decide(pid, board.seat_for_chat("-100", "77"), approve=True,
+                     rationale="capped at 6")
+
+    # handed the chair, alice presses and alice rules
+    board.set_chair(tid, "alice", "jeremy")
     board.decide(pid, board.seat_for_chat("-100", "77"), approve=True,
                  rationale="capped at 6")
     assert board.proposal(pid)["status"] == "approved"
@@ -590,3 +597,159 @@ def test_a_second_person_can_speak_not_only_rule(board):
     # seating an agent is a decision about whose subscription gets spent
     with pytest.raises(NotAuthorised):
         board.seat_human(tid, "santa")
+
+
+# ------------------------------------------------------------- topic picker
+#
+# Switching used to be `/topic switch <slug>`: an identifier retyped from
+# memory on a phone keyboard, where a near miss moves the whole room somewhere
+# nobody meant. These cover the parts that decide what a tap does, which are
+# pure and need no bot.
+
+
+def test_a_bare_topic_command_asks_for_the_picker_and_a_verb_does_not():
+    from mooting.telegram import wants_picker
+
+    assert wants_picker("/topic")
+    assert wants_picker("/topics")
+    assert wants_picker("  /Topics  ")
+    assert wants_picker("/topic@council_bot")
+    # A verb still means what it always did.
+    assert not wants_picker("/topic new should we cap retries")
+    assert not wants_picker("/topic switch retries")
+    assert not wants_picker("/topical")
+
+
+def test_the_picker_marks_where_the_room_is_and_shortens_long_titles():
+    from mooting.telegram import picker_rows
+
+    rows = [
+        {"id": 3, "slug": "retries", "status": "open",
+         "title": "Should failed webhook deliveries use exponential backoff"},
+        {"id": 2, "slug": "aircon", "status": "paused", "title": "Aircon"},
+        {"id": 1, "slug": "old", "status": "resolved", "title": "Old thing"},
+    ]
+    labels = [lbl for lbl, _ in picker_rows(rows, "retries")]
+
+    assert labels[0].startswith("●")
+    assert "●" not in labels[1]
+    assert labels[1].startswith("⏸")
+    assert labels[2].startswith("✓")
+    # A button is one line on a phone, so a long title is cut at a word.
+    assert len(labels[0]) <= 40
+    assert labels[0].endswith("…") and not labels[0].endswith(" …")
+
+
+def test_every_picker_button_carries_its_own_topic_id():
+    """A chat scrolls. A button meaning "the third one" would drift with it."""
+    from mooting.telegram import parse_pick, pick_callback, picker_rows
+
+    rows = [{"id": 41, "slug": "a", "status": "open", "title": "A"},
+            {"id": 7, "slug": "b", "status": "open", "title": "B"}]
+    picked = [parse_pick(pick_callback(tid)) for _, tid in picker_rows(rows, "a")]
+
+    assert picked == [41, 7]
+    assert all(len(pick_callback(tid).encode("utf-8")) <= 64
+               for _, tid in picker_rows(rows, None))
+    # A sign-off button is not a picker button, and neither is anything else.
+    assert parse_pick("rule:ok:3") is None
+    assert parse_pick("") is None
+    assert parse_pick("pick:notanumber") is None
+
+
+def test_the_picker_shows_at_most_one_screen_of_topics():
+    from mooting.telegram import PICKER_LIMIT, picker_rows
+
+    many = [{"id": i, "slug": f"t{i}", "status": "open", "title": f"T{i}"}
+            for i in range(40)]
+    assert len(picker_rows(many, None)) == PICKER_LIMIT
+
+
+def test_the_help_a_chat_receives_is_the_one_that_is_maintained():
+    """`HELP` was defined twice, and the second copy won.
+
+    The live text was the older one, which had lost the line telling somebody
+    how to ask to join — the single thing a person who is not paired needs.
+    Editing the first copy changed nothing, silently.
+    """
+    import mooting.telegram as tg
+
+    source = pathlib.Path(tg.__file__).read_text(encoding="utf-8")
+    assert source.count("\nHELP = (") == 1, "HELP is defined more than once"
+    assert "ask to join" in tg.HELP
+    assert "/topics" in tg.HELP
+
+
+def test_a_chat_still_pointing_at_a_deleted_topic_can_open_a_new_one(tmp_path):
+    """Found live: `/reset` cleared the board and the chat went completely mute.
+
+    The room kept standing on the topic it was on. Building the session for the
+    next message raised in the constructor, before any command was dispatched,
+    so nothing answered at all — including `/topic new`, which was the only way
+    back. Two people each read it as "I am not allowed to create a topic".
+    """
+    from mooting.store import connect
+    from mooting.telegram import ChatBoard
+
+    db = tmp_path / "board.db"
+    s = connect(db, init=True)
+    s.add_agent("Jeremy", "human")
+    s.add_agent("Santa", "claude", driver="spawn")
+    s.open_topic("gone", "Gone", "brief", "Jeremy", seats=("Jeremy", "Santa"))
+    s.clear_topics()
+    s.close()
+
+    board = ChatBoard(db, "gone", "Jeremy")
+    try:
+        assert board.topic is None, "still standing on a topic that is not there"
+        out = board.handle("/topic new can we open one after a reset")
+        assert "can-we-open-one-after-a-reset" in out
+        assert board.topic == "can-we-open-one-after-a-reset"
+    finally:
+        board.close()
+
+
+def test_every_command_in_the_menu_actually_exists(tmp_path):
+    """The menu is a promise: a thumb taps it and something has to happen.
+
+    `/attach` sat in the help and the Telegram menu for weeks while the console
+    answered "unknown /attach", because nothing checked that an advertised
+    command was a reachable one. Driving each entry is the check — a command
+    that is missing answers "unknown", and one that merely needs arguments
+    answers with its usage.
+    """
+    from mooting.store import connect
+    from mooting.telegram import MENU, ChatBoard
+
+    #: Handled by the bot itself rather than by the shared console dispatch.
+    bot_side = {"pair", "topics", "help"}
+
+    db = tmp_path / "board.db"
+    s = connect(db, init=True)
+    s.add_agent("Jeremy", "human")
+    s.add_agent("Santa", "claude", driver="spawn")
+    s.open_topic("t", "A topic", "brief", "Jeremy", seats=("Jeremy", "Santa"))
+    s.close()
+
+    missing = []
+    for command, _ in MENU:
+        if command in bot_side:
+            continue
+        board = ChatBoard(db, "t", "Jeremy")
+        try:
+            out = board.handle(f"/{command}")
+        finally:
+            board.close()
+        if f"unknown /{command}" in out:
+            missing.append(command)
+
+    assert not missing, f"advertised in the menu and not reachable: {missing}"
+
+
+def test_the_destructive_commands_stay_off_the_menu(tmp_path):
+    """`/reset` clears every topic, and has already been run here by accident."""
+    from mooting.telegram import MENU, OFF_MENU
+
+    listed = {command for command, _ in MENU}
+    assert not (listed & set(OFF_MENU)), \
+        "a destructive command is one tap from a thumb"

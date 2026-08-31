@@ -31,6 +31,18 @@ from .store import Store
 
 log = logging.getLogger("mooting.supervisor")
 
+#: How much backlog one wake carries. A seat further behind than this is caught
+#: up over several turns rather than in one, so the cursor it is given must be
+#: the last event actually included -- see `build_prompt`.
+CATCHUP_EVENTS = 200
+
+#: Words a seat is asked to stay under, by reasoning effort. A seat given more
+#: thinking time has genuinely more to report, and holding it to the same budget
+#: as a `low` turn either wastes the thinking or gets ignored. It buys density
+#: rather than a licence to ramble: even `high` is a third of what one live
+#: council averaged.
+WORDS_BY_EFFORT = {"low": 80, "medium": 130, "high": 200}
+
 
 def _attachment_section(store, topic_id: int, budget: int) -> list[str]:
     """Source material, put where every seat can actually reach it.
@@ -158,6 +170,14 @@ class Caps:
     max_attachment_chars: int = 8_000
     #: Consecutive silent turns across all seats that mean the debate is spent.
     quiet_rounds_to_settle: int = 1
+    #: Words a seat is asked to stay under. Measured on one real council: the
+    #: person chairing it wrote a median of 18 words a turn and the seats wrote
+    #: 136, one of them 558 with a longest of 1229. A council is read on a phone
+    #: as often as on a screen, and a turn nobody finishes reading is a turn
+    #: nobody answers -- so length is not only quota, it is whether the meeting
+    #: can be followed at all. "Be concise" was already in the prompt and moved
+    #: nothing; a number does.
+    words_per_turn: int = 120
 
 
 def snippet(text: str, limit: int = 200) -> str:
@@ -228,6 +248,7 @@ class Supervisor:
         """
         if self.store.topic(topic_id)["mode"] == "work":
             return await self.run_work(topic_id)
+        quiet = 0
         while True:
             reason = self._blocking_reason(topic_id)
             if reason:
@@ -250,10 +271,23 @@ class Supervisor:
                 # flight; they finish, and _blocking_reason catches it at the top
                 # of the next iteration. Per-seat caps bound the overrun.
                 head = self.store.head()
+                said_before = self._last_said(topic_id)
                 await self._gather(
                     (self.wake_seat(topic_id, a, head=head) for a in speakers),
                     what=f"concurrent round on topic {topic_id}",
                 )
+                # A round where every seat was woken and none of them posted is a
+                # council that has finished, not one that needs another round.
+                # Without this the loop woke every seat again each round until the
+                # ceiling, reported "rounds exhausted", and spent a real billed turn
+                # per seat per round to produce nothing -- so granting more rounds
+                # made it worse and ended at the same message.
+                quiet = quiet + 1 if self._last_said(topic_id) == said_before else 0
+                if quiet >= self.caps.quiet_rounds_to_settle:
+                    reason = (self._human_ask_reason(topic_id)
+                              or "the council has nothing further to add")
+                    self._park(topic_id, reason)
+                    return reason
                 # A concurrent round IS a round. Without this the counter only
                 # advanced in the "nobody left to speak" branch, which concurrency
                 # never reaches while seats still have peers to react to -- so
@@ -265,12 +299,36 @@ class Supervisor:
 
             speaker = speakers[0] if speakers else None
             if speaker is None:
+                if not self._budget_left(topic_id):
+                    reason = (self._human_ask_reason(topic_id)
+                              or "every seat is capped -- needs a person to extend "
+                                 "the budget or sign off")
+                    self._park(topic_id, reason)
+                    return reason
                 # Everyone has spoken and nobody has anything new. Advance, or settle.
                 if not self._advance_round(topic_id):
                     return self._human_ask_reason(topic_id) or "rounds_exhausted"
                 continue
 
+            said_before = self._last_said(topic_id)
             await self.wake_seat(topic_id, speaker)
+            quiet = quiet + 1 if self._last_said(topic_id) == said_before else 0
+            if quiet >= self.caps.quiet_rounds_to_settle * max(len(speakers), 1):
+                reason = (self._human_ask_reason(topic_id)
+                          or "the council has nothing further to add")
+                self._park(topic_id, reason)
+                return reason
+
+    def _last_said(self, topic_id: int) -> int:
+        """Id of the last thing a seat actually said, ignoring the loop's own notes.
+
+        `head` moves when the supervisor posts a round marker or a "was woken and
+        said nothing" note, so it cannot answer "did anybody speak this round".
+        """
+        row = self.store.q1(
+            "SELECT COALESCE(MAX(id), 0) m FROM messages "
+            "WHERE topic_id = ? AND kind != 'system'", (topic_id,))
+        return int(row["m"])
 
     def _advance_round(self, topic_id: int) -> bool:
         """Tick the round counter. False means the topic is out of rounds."""
@@ -743,17 +801,24 @@ class Supervisor:
             return True
 
         ordered: list[str] = []
-        # A mention buys priority, not budget: a capped seat is still not woken.
-        asked = self.store.open_mentions(topic_id)
-        for m in asked:
+        # Being named puts a seat next in line. A mention buys priority, not
+        # budget: a capped seat is still not woken.
+        for m in self.store.open_mentions(topic_id):
             s = seats.get(m["target"])
             if s is not None and s["agent"] not in ordered and can_speak(s):
                 ordered.append(s["agent"])
 
-        # An outstanding question narrows the round to whoever was asked. Letting
-        # the others carry on means the answer arrives into a conversation that
-        # has already moved past the question.
-        if asked:
+        # An outstanding *question* narrows the round to whoever was asked, because
+        # letting the others carry on means the answer arrives into a conversation
+        # that has already moved past it. Being named does not narrow anything, and
+        # this call site was missed when that distinction went in: a seat ending a
+        # turn with "Short version, @Jeremy: ..." names a person without asking
+        # them. Treating that as a question narrowed every later round to a human
+        # seat, which is never woken, so the list came back empty for ever -- and a
+        # named mention is not a reason to stop either, so nothing parked. The loop
+        # spent the whole round budget in one second and called it rounds exhausted,
+        # which is why granting more rounds only bought another second of it.
+        if self.store.open_mentions(topic_id, only_asks=True):
             return ordered
 
         for s in seats.values():
@@ -762,6 +827,24 @@ class Supervisor:
             if can_speak(s):
                 ordered.append(s["agent"])
         return ordered
+
+    def _budget_left(self, topic_id: int) -> bool:
+        """Has any drivable seat a turn left in it?
+
+        `_eligible` returns nobody both when the round is simply finished and when
+        every seat is spent, and only the first is worth another round. Advancing
+        on the second woke nothing and posted "round N of M" up to the ceiling,
+        which reads from outside like a council thinking.
+        """
+        for s in self.store.seats(topic_id):
+            if s["kind"] in {"human", "external"} or not s["enabled"]:
+                continue
+            if s["turns_used"] >= min(s["max_turns"], self.caps.max_turns_per_seat):
+                continue
+            if self.store.wakes_in_last_hour(s["agent"]) >= self.caps.max_wakes_per_agent_per_hour:
+                continue
+            return True
+        return False
 
     def _next_speaker(self, topic_id: int) -> str | None:
         eligible = self._eligible(topic_id)
@@ -789,9 +872,15 @@ class Supervisor:
         # in the round sees the same board.
         head = self.store.head() if head is None else head
 
-        new = self.store.events_since(cursor, topic_id, limit=200, until=head)
+        new = self.store.events_since(cursor, topic_id, limit=CATCHUP_EVENTS, until=head)
+        # The cursor may only move as far as this fetch reached. Returning `head`
+        # after a truncated fetch advanced the seat past events it was never shown,
+        # and nothing showed them again on any later turn -- a seat that fell far
+        # enough behind lost the middle of the argument for good.
+        behind = len(new) == CATCHUP_EVENTS
+        reached = int(new[-1].id) if behind else head
         msg_ids = [e.payload.get("message_id") for e in new if e.kind == "message"]
-        msgs = [m for m in self.store.transcript(topic_id) if m["id"] in set(filter(None, msg_ids))]
+        msgs = self.store.messages_by_id(msg_ids)
 
         seats = ", ".join(
             f"{s['agent']} ({s['kind']}, {s['turns_used']}/{min(s['max_turns'], self.caps.max_turns_per_seat)} turns)"
@@ -846,6 +935,11 @@ class Supervisor:
                     continue
                 kept.append((m, body))
                 spent += len(body)
+            if behind:
+                lines.append(f"_(You are more than {CATCHUP_EVENTS} events behind. "
+                             f"This is the oldest part of what you missed, and you "
+                             f"will be shown the rest when you next speak.)_")
+                lines.append("")
             if elided:
                 lines.append(f"_({elided} earlier message(s) left out — "
                              f"`mooting_read` for the full transcript.)_")
@@ -869,7 +963,20 @@ class Supervisor:
                 lines.append(f"  {p['body'].strip()[:600]}")
             lines.append("")
 
+        budget = WORDS_BY_EFFORT.get(self._effort_for(topic, agent) or "",
+                                     self.caps.words_per_turn)
         lines += [
+            "## How to say it",
+            "",
+            f"**Stay under {budget} words.** Open with your position in "
+            f"one sentence, then at most two things that support it. This is a meeting, "
+            f"and it is often read on a phone: a turn nobody finishes reading is a turn "
+            f"nobody answers.",
+            "",
+            "Do not restate the thread, do not preface what you are about to say, and do "
+            "not close by offering to expand. If you agree, say so in one sentence and "
+            "stop. Say the thing itself.",
+            "",
             "## What to do now",
             "",
             f"Use the **`mooting-{agent}`** MCP server — that one, not any other "
@@ -881,7 +988,7 @@ class Supervisor:
             "**only what you post through the tools reaches the council.**",
             "",
             "- `mooting_read(topic)` — full transcript, if the excerpt above is not enough.",
-            "- `mooting_say(topic, body)` — argue, add evidence, or disagree. One point, made well.",
+            "- `mooting_say(topic, body)` — argue, add evidence, or disagree. One point, briefly.",
             "- `mooting_propose(topic, title, body)` — a concrete decision you want taken.",
             "- `mooting_ask(topic, agent, question)` — put a question to one councillor by name.",
             *(["- `mooting_assign(topic, agent, title, body, acceptance)` — draft a task (manager only).",
@@ -894,7 +1001,7 @@ class Supervisor:
             "You cannot approve a proposal, including your own. Votes are advisory;",
             "a human holds every decision. Do not edit files — this council deliberates.",
         ]
-        return "\n".join(lines), head
+        return "\n".join(lines), reached
 
 
 async def run(store: Store, drivers: dict[str, Driver], topic_id: int, caps: Caps | None = None) -> str:

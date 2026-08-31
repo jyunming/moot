@@ -73,7 +73,7 @@ def mooting_inbox() -> str:
             continue
         new = b.events_since(seat["last_seen"], t["id"])
         msg_ids = {e.payload.get("message_id") for e in new if e.kind == "message"}
-        msgs = [m for m in b.transcript(t["id"]) if m["id"] in msg_ids and m["author"] != AGENT]
+        msgs = [m for m in b.messages_by_id(msg_ids) if m["author"] != AGENT]
         openp = b.proposals(t["id"], status="open")
 
         head = f"### `{t['slug']}` — {t['title']}  ({t['status']}, round {t['round'] + 1}/{t['max_rounds']})"
