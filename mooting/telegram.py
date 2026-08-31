@@ -692,11 +692,12 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                 for r in rows))
 
         if args[:1] == ["approve"]:
-            host = store.room_host(store.ensure_room("telegram", str(msg.chat.id)))
-            if not seat or (host and seat != host):
+            answers = (store.room_host(store.ensure_room("telegram", str(msg.chat.id)))
+                       or human)
+            if not seat or seat != answers:
                 return await say(msg.chat.id,
-                                 f"Only {host or 'a paired member'} can let "
-                                 f"somebody into this council.")
+                                 f"Only {answers} can let somebody into this "
+                                 f"council.")
             if len(args) < 2:
                 return await say(msg.chat.id, "Usage: `/pair approve <id>`")
             # Scoped to this chat: a request from another room is not this
@@ -888,11 +889,15 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                 continue                        # already one of us
             who = member.full_name or str(member.id)
             pid = store.pair_request(msg.chat.id, member.id, who)
-            by_owner = await owns_this_group(msg.chat.id, msg.from_user.id)
-            if by_owner or (host and added_by == host):
-                # Whoever made the group, or whoever hosts the room, adding
-                # somebody is that person deciding.
-                if by_owner and added_by:
+            # Owning the group is only ever a confirmation about somebody this
+            # board already knows. Taken on its own it is authority anybody can
+            # mint: make a group, add this bot, and every person you add is let
+            # onto a board that is not yours. `added_by` must be a seat here
+            # first -- the Telegram fact then says which seat is the host.
+            by_owner = bool(added_by) and await owns_this_group(
+                msg.chat.id, msg.from_user.id)
+            if added_by and (by_owner or (host and added_by == host)):
+                if by_owner:
                     host = store.claim_room(room_id, added_by)
                 seat = store.seat_name_for(who, fallback=f"guest{pid}")
                 try:
@@ -1143,12 +1148,15 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                 return await call.answer("not this chat", show_alert=True)
             presser = store.seat_for_chat(chat_id, call.from_user.id)
             room_id = store.ensure_room("telegram", str(chat_id))
-            host = store.room_host(room_id)
-            if not presser or (host and presser != host):
-                # A guest let into a council must not be able to let others in.
+            # No host yet means nobody has been established here, and "any paired
+            # member" would let the first person through the door hold it open
+            # for everybody behind them. Falls back to the person running the
+            # bot, who is the only one whose authority does not depend on this
+            # room being trustworthy.
+            answers = store.room_host(room_id) or human
+            if not presser or presser != answers:
                 return await call.answer(
-                    f"Only {host or 'somebody already in this council'} can "
-                    f"answer that.", show_alert=True)
+                    f"Only {answers} can answer that.", show_alert=True)
             want = store.q1("SELECT * FROM pairings WHERE id = ?", (pid,))
             if want is None:
                 return await call.answer("that request is gone", show_alert=True)

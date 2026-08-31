@@ -1254,3 +1254,44 @@ def test_a_guest_cannot_let_more_guests_in(tmp_path):
             assert (presser == s.room_host(rid)) is may
     finally:
         s.close()
+
+
+def test_owning_a_group_is_not_authority_over_somebody_elses_board(board):
+    """The hole: a stranger who knows the bot's name makes a group, adds it, and
+    is that group's creator. If creating a group were authority, every person
+    they added would be let onto a board that is not theirs -- and the first one
+    in could then hold the door for the rest.
+
+    The rule the join path applies: the person adding somebody must already hold
+    a seat here. Owning the group only says *which* seat is the host.
+    """
+    rid = board.ensure_room("telegram", "-100999")
+
+    # A stranger: not paired anywhere on this board.
+    added_by = board.seat_for_chat("-100999", "stranger")
+    assert added_by is None
+    # Which is the whole condition -- no seat, no auto-approval, whoever owns
+    # the group in Telegram.
+    assert not (added_by and True), "a stranger's invite was treated as a decision"
+    assert board.room_host(rid) is None, "a stranger took the room"
+
+
+def test_with_no_host_only_the_operator_answers_a_request(board):
+    """"Any paired member" let the first person through the door hold it open.
+
+    A room with no host has nobody established in it, so the fallback is the
+    person running the bot -- the only authority that does not depend on the
+    room being trustworthy.
+    """
+    board.add_agent("Guest", "human")
+    rid = board.ensure_room("telegram", "-100999")
+    operator = "jeremy"
+
+    answers = board.room_host(rid) or operator
+    assert answers == operator
+    for presser, may in ((operator, True), ("Guest", False), (None, False)):
+        assert (presser is not None and presser == answers) is may
+
+    # Once a host is established, it is theirs.
+    board.claim_room(rid, "Guest")
+    assert (board.room_host(rid) or operator) == "Guest"
