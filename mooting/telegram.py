@@ -509,6 +509,46 @@ def plain(rendered: str) -> str:
     return html.unescape(re.sub(r"<[^>]+>", "", rendered))
 
 
+#: A chat has no colour, so a seat gets a mark instead. Allocated by sorted
+#: position among the seats on the board rather than hashed, for the reason the
+#: full-screen view does the same: hashing put two of this project's own seats on
+#: one colour, and distinctness is the entire point.
+SEAT_MARKS = ("\U0001f535", "\U0001f7e2", "\U0001f7e1", "\U0001f7e3",
+              "\U0001f534", "\U0001f7e0", "\U0001f7e4", "\u26aa")
+
+
+def mark_for(store, name: str) -> str:
+    """The seat's mark, stable for as long as the roster is."""
+    names = sorted(a["name"] for a in store.agents())
+    if name not in names:
+        return ""
+    return SEAT_MARKS[names.index(name) % len(SEAT_MARKS)]
+
+
+def mention(store, name: str) -> str:
+    """A seat's name, as a real Telegram mention when the account is known.
+
+    A person whose account was bound by a claim code gets pinged rather than
+    merely written about -- which is the difference between being asked a
+    question and finding out later that one was asked.
+    """
+    row = store.q1("SELECT tg_user_id FROM agents WHERE name = ?", (name,))
+    if row and row["tg_user_id"]:
+        return f'<a href="tg://user?id={row["tg_user_id"]}">{html.escape(name)}</a>'
+    return html.escape(name)
+
+
+def with_mentions(store, body: str) -> str:
+    """Turn `@name` into a real mention for anybody whose account is known."""
+    import re as _re
+
+    def swap(m):
+        link = mention(store, m.group(1))
+        return link if link.startswith("<a ") else m.group(0)
+
+    return _re.sub(r"@([A-Za-z0-9_-]{2,32})", swap, body)
+
+
 def event_text(store, ev) -> str | None:
     """One board event as something worth putting in a chat, or nothing.
 
@@ -521,7 +561,8 @@ def event_text(store, ev) -> str | None:
                        (ev.payload.get("message_id"),))
         if row is None or row["kind"] == "system":
             return None
-        return f"**{row['author']}**\n{row['body']}"
+        head = f"{mark_for(store, row['author'])} **{row['author']}**".strip()
+        return f"{head}\n{row['body']}"
     if ev.kind == "proposal" and ev.payload.get("action") == "opened":
         # The pump normally sends these through `say_proposal`, so they arrive
         # with their buttons. This is the fallback when that could not render,
@@ -602,7 +643,8 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
         for piece in chunks(markdown):
             await t.wait()
             try:
-                await bot.send_message(chat_id, piece, parse_mode=ParseMode.HTML)
+                await bot.send_message(chat_id, with_mentions(store, piece),
+                                       parse_mode=ParseMode.HTML)
             except Exception as exc:
                 # A reply that cannot be formatted must still arrive. Losing a
                 # seat's argument to one stray character is the worst outcome.
@@ -1020,6 +1062,20 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                          Caps(effort=t["effort"] or "low",
                               max_turns_per_seat=budget))
 
+        async def typing_while(task):
+            """Telegram's own thinking indicator, for as long as a round runs.
+
+            A turn takes tens of seconds. Without this the chat is silent and
+            indistinguishable from a bot that has died -- which is exactly what
+            it looked like this afternoon.
+            """
+            while not task.done():
+                try:
+                    await bot.send_chat_action(msg.chat.id, "typing")
+                except Exception:
+                    return                      # never let the indicator kill a round
+                await asyncio.sleep(4.0)        # Telegram clears it after ~5s
+
         async def drive():
             try:
                 if t["status"] == "paused":
@@ -1038,6 +1094,7 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                 store.release_drive(tid, SESSION)
 
         running[tid] = asyncio.create_task(drive())
+        asyncio.create_task(typing_while(running[tid]))
         await say(msg.chat.id,
                   f"Thinking at effort **{t['effort'] or 'low'}**. Replies "
                   f"arrive as each seat finishes — about 30 seconds a turn at "

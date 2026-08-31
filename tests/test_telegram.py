@@ -1390,3 +1390,37 @@ def test_another_rooms_person_is_still_heard(board):
     delivered = [e.actor for e in board.events_since(0, tid)
                  if e.kind == "message" and e.actor not in seats_here]
     assert "ege" in delivered, "somebody outside this room went unheard"
+
+
+def test_each_seat_carries_a_mark_and_keeps_it(board):
+    """A chat has no colour, so a seat gets a mark. Scanning for who said what
+    should be a glance, which is what the full-screen view uses colour for."""
+    from mooting.telegram import mark_for
+
+    board.add_agent("kevin", "agy", driver="spawn")
+    first = {n: mark_for(board, n) for n in ("jeremy", "santa", "kevin")}
+
+    assert len(set(first.values())) == 3, "two seats share a mark"
+    assert mark_for(board, "santa") == first["santa"], "a mark moved on its own"
+    assert mark_for(board, "nobody") == ""
+
+
+def test_a_person_whose_account_is_known_is_really_mentioned(board):
+    """Being asked a question and finding out later are different things."""
+    from mooting.telegram import with_mentions
+
+    board.bind_identity("jeremy", "8770943593")
+
+    out = with_mentions(board, "@jeremy which rooms?")
+    assert 'tg://user?id=8770943593' in out
+    assert ">jeremy</a>" in out
+
+
+def test_a_name_with_no_account_is_left_as_written(board):
+    """Half a mention is worse than none: a broken link reads as a bug."""
+    from mooting.telegram import with_mentions
+
+    assert with_mentions(board, "@santa what about it") == "@santa what about it"
+    assert with_mentions(board, "no names here") == "no names here"
+    # And an address that is not a seat is not touched either.
+    assert "@nobody" in with_mentions(board, "ask @nobody")
