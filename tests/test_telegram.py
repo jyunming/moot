@@ -1295,3 +1295,62 @@ def test_with_no_host_only_the_operator_answers_a_request(board):
     # Once a host is established, it is theirs.
     board.claim_room(rid, "Guest")
     assert (board.room_host(rid) or operator) == "Guest"
+
+
+# ------------------------------------------------------------------- claiming
+#
+# Every earlier way of saying who owns a board was something a stranger could
+# produce: a name on the command line, being first to pair, or creating the
+# Telegram group. Reading the terminal the board lives on is not.
+
+
+def test_a_code_is_worth_one_use_and_then_nothing(board):
+    code = board.new_claim("jeremy")
+    assert board.redeem_claim(code) == "jeremy"
+    assert board.redeem_claim(code) is None, "a code worked twice"
+
+
+def test_a_wrong_or_stale_code_is_worth_nothing(board):
+    code = board.new_claim("jeremy")
+    assert board.redeem_claim("nope") is None
+    assert board.redeem_claim(code.upper()) == "jeremy", "case should not matter"
+
+    board.new_claim("jeremy", ttl_s=-1)
+    assert board.redeem_claim(board.setting("claim.code") or "x") is None
+    assert board.setting("claim.code") is None, "a stale code was left lying about"
+
+
+def test_a_code_cannot_hand_out_an_agent_seat(board):
+    with pytest.raises(NotAuthorised):
+        board.new_claim("santa")
+
+
+def test_identity_is_the_account_not_the_name(board):
+    """A name in a message is a claim anybody can make."""
+    board.add_agent("Guest", "human")
+    board.bind_identity("jeremy", "8770943593")
+
+    assert board.seat_for_identity("8770943593") == "jeremy"
+    assert board.seat_for_identity("999") is None
+    # And it outranks anything inferred from pairing rows.
+    assert board.seat_for_user("8770943593") == "jeremy"
+
+    # One account, one seat: rebinding moves it rather than duplicating it.
+    board.bind_identity("Guest", "8770943593")
+    assert board.seat_for_identity("8770943593") == "Guest"
+    assert board.q1("SELECT tg_user_id FROM agents WHERE name='jeremy'")["tg_user_id"] is None
+
+
+def test_an_unknown_chat_is_not_a_chat_this_bot_works_in(board):
+    """Default deny. Without an allowlist the bot answered anywhere it was added,
+    so anybody who knew its name could stand up a group and talk to this board.
+
+    This is the check `allowed` makes when no `--chat` was given.
+    """
+    assert board.pairings("approved", chat_id="-100999") == []
+
+    board.pair_approve(board.pair_request("-100111", "42", "Jeremy"),
+                       "jeremy", "jeremy")
+    assert board.pairings("approved", chat_id="-100111") != []
+    assert board.pairings("approved", chat_id="-100999") == [], \
+        "an unknown chat looked known"

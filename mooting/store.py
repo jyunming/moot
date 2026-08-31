@@ -276,6 +276,7 @@ class Store:
                                    ("rooms", "host", "TEXT"),
                                    ("topics", "room_id", "INTEGER"),
                                    ("pairings", "ref", "TEXT"),
+                                   ("agents", "tg_user_id", "TEXT"),
                                    ("mentions", "asking", "INTEGER NOT NULL DEFAULT 1"),
                                    ("tasks", "base_sha", "TEXT")):
             cols = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
@@ -935,6 +936,66 @@ class Store:
         return self.q1("SELECT * FROM pairings WHERE channel = ? AND chat_id = ? "
                        "AND user_id = ?", (channel, str(chat_id), str(user_id)))
 
+    #: How long a claim code is worth anything. Long enough to walk to a phone,
+    #: short enough that a code left on a screen is not a standing invitation.
+    CLAIM_TTL_S = 900.0
+
+    def new_claim(self, seat: str, ttl_s: float | None = None) -> str:
+        """A one-time code that proves whoever redeems it reached this machine.
+
+        Every other way of identifying the owner was something a stranger could
+        produce: a name passed on the command line, being the first to pair, or
+        creating the Telegram group. This one cannot be produced without reading
+        the terminal the board lives on, which is the thing an owner actually
+        has and nobody else does.
+        """
+        if not self.is_human(seat):
+            raise NotAuthorised(f"{seat!r} is not a human seat")
+        import time
+
+        code = secrets.token_hex(3)
+        self.set_setting("claim.code", code)
+        self.set_setting("claim.seat", seat)
+        self.set_setting("claim.expires",
+                         str(time.time() + (self.CLAIM_TTL_S if ttl_s is None else ttl_s)))
+        return code
+
+    def redeem_claim(self, code: str) -> str | None:
+        """The seat this code was for, once. `None` if it is wrong or stale."""
+        import time
+
+        want = self.setting("claim.code")
+        seat = self.setting("claim.seat")
+        until = self.setting("claim.expires")
+        if not want or not seat:
+            return None
+        if not secrets.compare_digest(str(code).strip().lower(), want):
+            return None
+        if until and time.time() > float(until):
+            self.drop_claim()
+            return None
+        self.drop_claim()
+        return seat
+
+    def drop_claim(self) -> None:
+        for key in ("claim.code", "claim.seat", "claim.expires"):
+            self.set_setting(key, None)
+
+    def bind_identity(self, seat: str, user_id: str) -> None:
+        """Bind a chat account to a seat, so identity is not a name in a message."""
+        if not self.is_human(seat):
+            raise NotAuthorised(f"{seat!r} is not a human seat")
+        with self.tx() as c:
+            c.execute("UPDATE agents SET tg_user_id = NULL WHERE tg_user_id = ?",
+                      (str(user_id),))
+            c.execute("UPDATE agents SET tg_user_id = ? WHERE name = ?",
+                      (str(user_id), seat))
+
+    def seat_for_identity(self, user_id: str) -> str | None:
+        """The seat this account has proved it holds, in any room or none."""
+        row = self.q1("SELECT name FROM agents WHERE tg_user_id = ?", (str(user_id),))
+        return row["name"] if row else None
+
     def seat_for_user(self, user_id: str, channel: str = "telegram") -> str | None:
         """The seat this account already holds, in any room.
 
@@ -943,6 +1004,9 @@ class Store:
         person rather than the room, and it exists so the operator does not have
         to bootstrap themselves from a terminal every time they open a group.
         """
+        bound = self.seat_for_identity(user_id)
+        if bound:
+            return bound
         row = self.q1(
             "SELECT seat FROM pairings WHERE channel = ? AND user_id = ? "
             "AND status = 'approved' AND seat IS NOT NULL LIMIT 1",

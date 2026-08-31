@@ -19,6 +19,10 @@ CREATE TABLE IF NOT EXISTS agents (
     -- they read the board themselves". See docs/DRIVERS.md for why this is per-CLI.
     driver      TEXT,                       -- stdio_json|acp|spawn|none
     driver_cfg  TEXT NOT NULL DEFAULT '{}', -- JSON: cwd, model, extra argv
+    -- The chat account this seat belongs to, once somebody has proved they hold
+    -- it. A name in a message is a claim anybody can make; this is the account
+    -- that redeemed a code only a person at the machine could read.
+    tg_user_id  TEXT,
     enabled     INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );

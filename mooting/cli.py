@@ -570,6 +570,30 @@ def cmd_telegram(args) -> int:
                    topic=args.topic, remember=remember)
 
 
+def cmd_claim(args) -> int:
+    """Print a code that proves whoever redeems it reached this machine.
+
+    Every other way of saying who owns a board is something a stranger can
+    produce: a name passed on the command line, being first to pair, or creating
+    the Telegram group. Reading this terminal is not.
+    """
+    board = _board(args)
+    who = args.seat or _human(board, args.as_)
+    try:
+        code = board.new_claim(who)
+    except (StoreError, NotAuthorised) as exc:
+        print(f"mooting: {exc}", file=sys.stderr)
+        board.close()
+        return 1
+    minutes = int(board.CLAIM_TTL_S // 60)
+    print(f"send this to the bot, from the account that should be `{who}`:")
+    print(f"\n    /pair {code}\n")
+    print(f"good for {minutes} minutes, once. It binds that chat account to the")
+    print(f"seat and makes them the host of the room they send it in.")
+    board.close()
+    return 0
+
+
 def cmd_pair(args) -> int:
     """Approve, deny or list chat identities from the shell."""
     board = _board(args)
@@ -871,6 +895,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--forget-token", action="store_true",
                    help="remove the saved token and exit")
     p.set_defaults(fn=cmd_telegram)
+
+    p = sub.add_parser("claim", help="a one-time code that hands somebody a seat "
+                                     "and hosts them in the room they use it in")
+    p.add_argument("--seat", help="the human seat the code is for (default: you)")
+    p.set_defaults(fn=cmd_claim)
 
     p = sub.add_parser("pair", help="who may act as which seat in a chat")
     p.add_argument("--approve", help="pairing id to approve")

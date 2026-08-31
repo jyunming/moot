@@ -572,7 +572,18 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
     chats = {str(c) for c in (chats or [])}
     #: A one-time code, only while nobody is paired. Once somebody is, approving
     #: is their job.
-    claim = {"code": None if store.pairings("approved") else secrets.token_hex(3)}
+    # One mechanism, not two. This used to mint its own code that only the
+    # bootstrap branch honoured; it is now an ordinary claim, so `mooting claim`
+    # and a first run produce the same thing and are redeemed the same way.
+    def _first_code() -> str | None:
+        if store.pairings("approved"):
+            return None
+        try:
+            return store.new_claim(human)
+        except (StoreError, NotAuthorised):
+            return None
+
+    claim = {"code": _first_code()}
     #: Which topic each chat is standing on; a council spans many messages.
     #: Where each chat is standing. `None` means the topic it was on has gone,
     #: which is different from never having had one only in how it got here.
@@ -599,6 +610,17 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                 log.warning("fell back to plain text: %s", exc)
 
     def allowed(chat_id) -> bool:
+        # Default deny. Without an allowlist this answered anywhere it was
+        # added, so anybody who knew the bot's name could stand up a group and
+        # start talking to somebody else's board. A room is known once a code
+        # from the machine has been redeemed in it, or once somebody has been
+        # approved there; `--chat` still names them outright.
+        if not chats and not store.pairings("approved", chat_id=chat_id):
+            if str(chat_id) not in seen:
+                seen.add(str(chat_id))
+                print(f"  ignored a message from chat {chat_id} — `mooting claim`"
+                      f" prints a code that lets somebody in there")
+            return False
         if chats and str(chat_id) not in chats:
             # The id is the thing the operator needs and cannot otherwise get.
             # Ignoring the message silently leaves them no way to find it.
@@ -676,9 +698,25 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
 
     @dp.message(Command("pair"))
     async def on_pair(msg: Message):
+        args = (msg.text or "").split()[1:]
+        # Checked before the allowlist on purpose: a code read off the terminal
+        # is how a room nobody has been approved in becomes a room at all.
+        if len(args) == 1 and args[0] not in {"list", "approve", "deny"}:
+            got = store.redeem_claim(args[0])
+            if got:
+                pid = store.pair_request(msg.chat.id, msg.from_user.id,
+                                         msg.from_user.full_name or "")
+                store.pair_approve(pid, got, got)
+                store.bind_identity(got, msg.from_user.id)
+                store.claim_room(store.ensure_room("telegram", str(msg.chat.id)), got)
+                return await say(
+                    msg.chat.id,
+                    f"Paired. You speak as **{got}** and host this room."
+                    f"\n\nThis chat is `{msg.chat.id}` — pass "
+                    f"`--chat {msg.chat.id}` when starting the bot to keep it to "
+                    f"this room only.")
         if not allowed(msg.chat.id):
             return
-        args = (msg.text or "").split()[1:]
         seat = store.seat_for_chat(msg.chat.id, msg.from_user.id)
 
         if args[:1] == ["list"]:
@@ -748,23 +786,6 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                 msg.chat.id,
                 f"Paired. You speak as **{human}**, the seat you already hold."
                 f"\n\nThis chat is `{msg.chat.id}`.")
-
-        # Bootstrap. The first person has nobody to approve them, so the code
-        # printed at startup stands in for the authority they do not have yet --
-        # holding it proves they can see the machine the bot runs on.
-        if claim["code"] and args[:1] == [claim["code"]]:
-            pid = store.pair_request(msg.chat.id, msg.from_user.id,
-                                     msg.from_user.full_name or "")
-            target = store.seat_name_for(msg.from_user.full_name or "",
-                                         fallback=human)
-            row = store.pair_approve(pid, target, target)
-            claim["code"] = None                 # one use, then it is gone
-            return await say(
-                msg.chat.id,
-                f"Paired. You speak as **{row['seat']}**.\n\n"
-                f"Next: `/topic new <your question>`, then `/run`.\n\n"
-                f"This chat is `{msg.chat.id}` — pass `--chat {msg.chat.id}` "
-                f"when starting the bot to keep it to this room only.")
 
         who = msg.from_user.full_name or str(msg.from_user.id)
         pid = store.pair_request(msg.chat.id, msg.from_user.id, who)
@@ -1390,7 +1411,8 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
         print(f"  pair    send  /pair {claim['code']}  to the bot to claim the "
               f"first seat")
     else:
-        print("  pair    an existing member approves with /pair approve <id>")
+        print("  pair    the host approves in the chat; `mooting claim` prints a "
+              "code for a new room")
     print(f"  chats   {', '.join(sorted(chats)) if chats else 'ANY (use --chat)'}")
     print("  polling; Ctrl-C to stop")
 
