@@ -1032,3 +1032,25 @@ def test_topics_that_predate_rooms_stay_visible_everywhere(tmp_path):
             assert s.topic_visible_in(tid, s.ensure_room("telegram", chat))
     finally:
         s.close()
+
+
+def test_the_account_running_the_bot_is_known_across_rooms(board):
+    """Pairing is per room, and that left the operator with nobody to ask.
+
+    Opening a group of your own meant sending `/pair` into a room where no
+    member existed yet, then going to a terminal to approve yourself. The one
+    question that is about the person rather than the room answers it.
+    """
+    board.pair_approve(board.pair_request("8770943593", "8770943593", "Jeremy"),
+                       "jeremy", "jeremy")
+
+    # The same Telegram account, seen in a room it has never been in.
+    assert board.seat_for_user("8770943593") == "jeremy"
+    # And nobody else is recognised this way.
+    assert board.seat_for_user("999999") is None
+
+
+def test_a_pending_request_does_not_make_somebody_known(board):
+    """Asking is not being approved, in any room."""
+    board.pair_request("-100999", "555", "A Stranger")
+    assert board.seat_for_user("555") is None

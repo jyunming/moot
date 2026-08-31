@@ -901,6 +901,20 @@ class Store:
         return self.q1("SELECT * FROM pairings WHERE channel = ? AND chat_id = ? "
                        "AND user_id = ?", (channel, str(chat_id), str(user_id)))
 
+    def seat_for_user(self, user_id: str, channel: str = "telegram") -> str | None:
+        """The seat this account already holds, in any room.
+
+        Pairing is per room on purpose -- being trusted in one council is not
+        being trusted in another. This is the one question that is about the
+        person rather than the room, and it exists so the operator does not have
+        to bootstrap themselves from a terminal every time they open a group.
+        """
+        row = self.q1(
+            "SELECT seat FROM pairings WHERE channel = ? AND user_id = ? "
+            "AND status = 'approved' AND seat IS NOT NULL LIMIT 1",
+            (channel, str(user_id)))
+        return row["seat"] if row else None
+
     def pair_request(self, chat_id: str, user_id: str, display: str = "",
                      channel: str = "telegram") -> int:
         """Record an unknown sender. Inert until somebody approves them."""

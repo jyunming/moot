@@ -459,6 +459,32 @@ def picker_rows(topics, current: str | None) -> list[tuple[str, int]]:
     return rows
 
 
+#: A request to join arrives with the answer attached. `/pair approve 3` asks
+#: somebody to read a number off an earlier message and retype it, which is the
+#: same gesture `/approve 3` was replaced for -- and the number is meaningless to
+#: the person being asked to trust somebody.
+JOIN_PREFIX = "join"
+
+
+def join_callback(action: str, pid: int) -> str:
+    if action not in {"ok", "no"}:
+        raise ValueError(f"unknown join action {action!r}")
+    data = f"{JOIN_PREFIX}:{action}:{int(pid)}"
+    if len(data.encode("utf-8")) > 64:
+        raise ValueError("callback_data over Telegram's 64-byte limit")
+    return data
+
+
+def parse_join(data: str) -> tuple[str, int] | None:
+    """`(action, pairing id)`, or None if this is not one of ours."""
+    parts = (data or "").split(":")
+    if len(parts) != 3 or parts[0] != JOIN_PREFIX:
+        return None
+    if parts[1] not in {"ok", "no"} or not parts[2].isdigit():
+        return None
+    return parts[1], int(parts[2])
+
+
 def rule_callback(action: str, pid: int) -> str:
     if action not in {"ok", "no", "full"}:
         raise ValueError(f"unknown ruling action {action!r}")
@@ -699,6 +725,20 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
         if seat:
             return await say(msg.chat.id, f"You already speak as **{seat}**.")
 
+        # The person running the bot holds the token, and a room they added it to
+        # is a room they authorised. Recognising them saves a trip to a terminal
+        # to approve themselves into their own group -- which was the one case
+        # where per-room approval had nobody to ask. Only this account, and only
+        # into the seat it already holds: everybody else still needs a member.
+        if store.seat_for_user(msg.from_user.id) == human:
+            pid = store.pair_request(msg.chat.id, msg.from_user.id,
+                                     msg.from_user.full_name or "")
+            store.pair_approve(pid, human, human)
+            return await say(
+                msg.chat.id,
+                f"Paired. You speak as **{human}**, the seat you already hold."
+                f"\n\nThis chat is `{msg.chat.id}`.")
+
         # Bootstrap. The first person has nobody to approve them, so the code
         # printed at startup stands in for the authority they do not have yet --
         # holding it proves they can see the machine the bot runs on.
@@ -716,11 +756,9 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
                 f"This chat is `{msg.chat.id}` — pass `--chat {msg.chat.id}` "
                 f"when starting the bot to keep it to this room only.")
 
-        pid = store.pair_request(msg.chat.id, msg.from_user.id,
-                                 msg.from_user.full_name or "")
-        await say(msg.chat.id,
-                  f"Pairing request `{pid}` recorded. A paired member approves "
-                  f"it with `/pair approve {pid}`.")
+        who = msg.from_user.full_name or str(msg.from_user.id)
+        pid = store.pair_request(msg.chat.id, msg.from_user.id, who)
+        await say_join_request(msg.chat.id, pid, who)
 
     @dp.message(Command("minutes"))
     async def on_minutes(msg: Message):
@@ -963,6 +1001,26 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
             log.warning("proposal keyboard failed: %s", exc)
             await say(chat_id, text)
 
+    async def say_join_request(chat_id, pid: int, who: str) -> None:
+        """A request to join, with the answer attached."""
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+        keys = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"\u2713 Let {who} in",
+                                 callback_data=join_callback("ok", pid)),
+            InlineKeyboardButton(text="\u2717 No",
+                                 callback_data=join_callback("no", pid)),
+        ]])
+        try:
+            await bot.send_message(
+                chat_id,
+                f"<b>{html.escape(who)}</b> asks to join this council.",
+                reply_markup=keys, parse_mode=ParseMode.HTML)
+        except Exception as exc:
+            log.warning("join keyboard failed: %s", exc)
+            await say(chat_id, f"{who} asks to join. `/pair approve {pid}` to let "
+                               f"them in.")
+
     async def send_picker(chat_id, *, message_id: int | None = None) -> None:
         """The topic list, as one button per row.
 
@@ -1006,6 +1064,37 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
         from aiogram.types import ForceReply
 
         chat_id = call.message.chat.id
+        joining = parse_join(call.data or "")
+        if joining is not None:
+            action, pid = joining
+            if not allowed(chat_id):
+                return await call.answer("not this chat", show_alert=True)
+            presser = store.seat_for_chat(chat_id, call.from_user.id)
+            if not presser:
+                # The same rule as `/pair approve`: a member decides who joins.
+                return await call.answer(
+                    "Only somebody already in this council can answer that.",
+                    show_alert=True)
+            want = store.q1("SELECT * FROM pairings WHERE id = ?", (pid,))
+            if want is None:
+                return await call.answer("that request is gone", show_alert=True)
+            if want["status"] != "pending":
+                return await call.answer(f"already {want['status']}", show_alert=True)
+            try:
+                if action == "no":
+                    store.pair_deny(pid, presser)
+                    await call.answer("refused")
+                    return await say(chat_id, f"{want['display'] or pid} was not "
+                                              f"let in.")
+                seat = store.seat_name_for(want["display"], fallback=f"guest{pid}")
+                row = store.pair_approve(pid, seat, presser)
+            except (StoreError, NotAuthorised) as exc:
+                return await call.answer(str(exc)[:180], show_alert=True)
+            await call.answer(f"{row['seat']} is in")
+            return await say(chat_id,
+                             f"{row['display'] or row['user_id']} now speaks as "
+                             f"**{row['seat']}**, let in by {presser}.")
+
         picked = parse_pick(call.data or "")
         if picked is not None:
             if not allowed(chat_id):
@@ -1094,11 +1183,10 @@ def run(db, *, bot_token: str, chats, human: str, topic=None,
         if not seat:
             # Inert on purpose. An unknown sender in a group must not be able to
             # open topics or spend anybody's subscription.
-            pid = store.pair_request(msg.chat.id, msg.from_user.id,
-                                     msg.from_user.full_name or "")
-            return await say(msg.chat.id,
-                             f"You are not paired here. Request `{pid}` is "
-                             f"waiting for a member to approve it.")
+            who = msg.from_user.full_name or str(msg.from_user.id)
+            pid = store.pair_request(msg.chat.id, msg.from_user.id, who)
+            await say(msg.chat.id, "You are not paired here yet.")
+            return await say_join_request(msg.chat.id, pid, who)
         # `/topic` with no verb is somebody asking where they are and where
         # else they could be. That is a list to tap, not a slug to retype.
         if wants_picker(msg.text):
