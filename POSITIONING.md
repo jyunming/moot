@@ -186,11 +186,29 @@ do the work, which gives it a shell, and the shell reaches `mooting approve`.
 `Store.decide` identifies a person by name, and the CLI resolves that name
 automatically when a board has one human seat.
 
-That window is narrow — only a seat a person already signed off for a specific
-task on a work topic can reach it, which is what the two-key execute check is
-for — and it is real. It is also closable with something already built: the
-per-human tokens the HTTP surface uses. Until it is closed, the claim is about
+**That window is now closed, and closing it is worth saying.** While a seat is
+executing, a sign-off typed on this machine is refused, because it cannot be
+told from one that seat typed. The message names the way out: a chat account is
+something the seat does not hold, and a claim code binds one to a seat by
+proving somebody reached the terminal. So the claim is no longer only about the
+protocol — it is about the machine for as long as the machine is untrustworthy,
+which is exactly while a seat holds a shell on it. What remains outside it is an
+agent writing to the SQLite file directly, which is an OS sandbox's job.
+
+The superseded version of this limit, kept because the reasoning is what
+matters: the window was narrow — only a seat a person already signed off for a
+specific task on a work topic could reach it — and it was real. Until it was
+closed, the claim was about
 the protocol, and the doc says so in the same breath.
+
+**A council reads whatever its seats' working directories mean to them.** Found
+here, not in anybody's documentation: a board asked "how can I make money"
+answered with the chair's age, city and profession, none of which was on the
+board. A coding CLI loads its own per-directory memory before it sees the
+council's prompt, so pointing a seat at a working project brings that project's
+notes into an unrelated discussion. Every cross-vendor council has this problem
+and nothing else names it. `mooting doctor` now reports it, and `cwd` and `repo`
+are separate settings because they want opposite things.
 
 **The record is legible, not tamper-evident.** The board is an ordinary SQLite
 file. It records who posted and who signed off; nothing yet makes that record
