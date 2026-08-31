@@ -1312,3 +1312,73 @@ def test_a_meeting_whose_opener_is_also_gone_is_still_decidable(board):
     pid = board.propose(topic, "claude", "Cap at 6", "body")
     board.decide(pid, "ege", approve=True, rationale="somebody has to")
     assert board.proposal(pid)["status"] == "approved"
+
+
+# --------------------------------------------------------------------- rooms
+#
+# A room owns a roster, so a meeting opened there starts with the right seats
+# instead of being seated by hand every time — and two groups on one board stop
+# sharing a team by accident.
+
+
+def test_a_room_is_created_the_first_time_it_is_used(board):
+    first = board.ensure_room("telegram", "-100123", "engine team")
+    again = board.ensure_room("telegram", "-100123")
+
+    assert first == again, "made a second room for the same chat"
+    assert board.room("telegram", "-100123")["label"] == "engine team"
+    assert board.room("telegram", "nobody-here") is None
+
+
+def test_work_with_no_chat_behind_it_still_has_a_room(board):
+    """A terminal session is not a special case that half the code remembers."""
+    channel, chat = board.LOCAL_ROOM
+    rid = board.ensure_room(channel, chat)
+    assert board.room(*board.LOCAL_ROOM)["id"] == rid
+
+
+def test_a_room_holds_a_team_in_the_order_it_was_set(board):
+    rid = board.ensure_room("telegram", "-100123")
+    assert board.room_team(rid) == []
+
+    board.set_room_team(rid, ["claude", "codex"], "human")
+    assert board.room_team(rid) == ["claude", "codex"]
+
+    # Replacement, not merge: one command that sticks, one that does not.
+    board.set_room_team(rid, ["gemini", "claude"], "human")
+    assert board.room_team(rid) == ["gemini", "claude"]
+
+
+def test_setting_a_team_needs_a_person_and_real_seats(board):
+    rid = board.ensure_room("telegram", "-100123")
+
+    with pytest.raises(NotAuthorised):
+        board.set_room_team(rid, ["claude"], "claude")
+    with pytest.raises(StoreError):
+        board.set_room_team(rid, ["nobody-registered"], "human")
+    assert board.room_team(rid) == [], "a refused change left something behind"
+
+
+def test_two_rooms_hold_different_teams(board):
+    """The whole point: one board, two groups, no shared seats by accident."""
+    abc = board.ensure_room("telegram", "-100111", "team abc")
+    dfg = board.ensure_room("telegram", "-100222", "team def")
+
+    board.set_room_team(abc, ["claude", "codex"], "human")
+    board.set_room_team(dfg, ["gemini"], "human")
+
+    assert board.room_team(abc) == ["claude", "codex"]
+    assert board.room_team(dfg) == ["gemini"]
+
+
+def test_a_team_follows_a_rename_and_forgets_a_deleted_seat(board):
+    """Both foreign keys onto `agents(name)`, and both have bitten before."""
+    rid = board.ensure_room("telegram", "-100123")
+    board.set_room_team(rid, ["claude", "codex"], "human")
+
+    board.rename_agent("claude", "Santa")
+    assert board.room_team(rid) == ["Santa", "codex"], "the team was left behind"
+
+    counts = board.delete_agent("codex")
+    assert counts["teams"] == 1, "the seat left the team quietly"
+    assert board.room_team(rid) == ["Santa"]

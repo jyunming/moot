@@ -226,6 +226,31 @@ CREATE TABLE IF NOT EXISTS pairings (
 );
 CREATE INDEX IF NOT EXISTS idx_pairings_status ON pairings(status);
 
+-- Where a council meets: a chat, or the board itself when the work is happening
+-- at a terminal. A room owns a roster, so a meeting opened there starts with the
+-- right seats instead of being seated by hand every time -- and two groups on
+-- one board stop sharing a team by accident.
+CREATE TABLE IF NOT EXISTS rooms (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel     TEXT NOT NULL DEFAULT 'telegram',   -- telegram | local
+    chat_id     TEXT NOT NULL,
+    label       TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(channel, chat_id)
+);
+
+-- The room's team. Seating a meeting copies this; changing that meeting's seats
+-- does not come back here, because a seat added for one question should not
+-- quietly join every later one. Redefining the team is its own gesture.
+CREATE TABLE IF NOT EXISTS room_seats (
+    room_id     INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    agent       TEXT NOT NULL REFERENCES agents(name),
+    -- Kept explicitly: a roster is written in an order somebody chose, and
+    -- `added_at` cannot separate two seats set in the same second.
+    position    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (room_id, agent)
+);
+
 -- Small facts about this board that are not about a topic: a bot token, a
 -- default, a channel setting. Kept here rather than in a config file so a board
 -- is one artefact -- copy the file and everything about that council comes with

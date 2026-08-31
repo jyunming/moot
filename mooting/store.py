@@ -388,6 +388,8 @@ class Store:
         # terminal worked and `/me` in a chat answered "FOREIGN KEY constraint
         # failed", because only a paired person has a row here.
         ("pairings", "seat"),
+        # `room_seats.agent` is another real foreign key, for the same reason.
+        ("room_seats", "agent"),
     )
 
     def rename_agent(self, old: str, new: str) -> None:
@@ -444,7 +446,10 @@ class Store:
         # letting it happen quietly.
         counts["pairings"] = self.q1(
             "SELECT COUNT(*) c FROM pairings WHERE seat = ?", (name,))["c"]
+        counts["teams"] = self.q1(
+            "SELECT COUNT(*) c FROM room_seats WHERE agent = ?", (name,))["c"]
         with self.tx() as c:
+            c.execute("DELETE FROM room_seats WHERE agent = ?", (name,))
             # Leaving the chair pointing at somebody who is gone made the topic
             # undecidable: not the chair for everyone else, not a human seat for
             # the name itself. Clearing it falls back to whoever opened it.
@@ -795,6 +800,58 @@ class Store:
         with self.tx() as c:
             self._emit(c, topic_id, "remote", actor,
                        {"action": action, **(detail or {})})
+
+    # -------------------------------------------------------------------- rooms
+
+    #: Work with no chat behind it still happens somewhere. A terminal session
+    #: opens topics in the local room, so a room is never a special case that
+    #: half the code has to remember.
+    LOCAL_ROOM = ("local", "board")
+
+    def ensure_room(self, channel: str = "local", chat_id: str = "board",
+                    label: str = "") -> int:
+        """The room's id, creating it the first time it is used."""
+        with self.tx() as c:
+            c.execute("INSERT OR IGNORE INTO rooms (channel, chat_id, label) "
+                      "VALUES (?,?,?)", (channel, str(chat_id), label))
+            if label:
+                c.execute("UPDATE rooms SET label = ? WHERE channel = ? AND chat_id = ?",
+                          (label, channel, str(chat_id)))
+        return int(self.q1("SELECT id FROM rooms WHERE channel = ? AND chat_id = ?",
+                           (channel, str(chat_id)))["id"])
+
+    def room(self, channel: str, chat_id: str) -> sqlite3.Row | None:
+        return self.q1("SELECT * FROM rooms WHERE channel = ? AND chat_id = ?",
+                       (channel, str(chat_id)))
+
+    def rooms(self) -> list[sqlite3.Row]:
+        return self.q("SELECT * FROM rooms ORDER BY id")
+
+    def room_team(self, room_id: int) -> list[str]:
+        """The seats a meeting opened in this room starts with."""
+        return [r["agent"] for r in self.q(
+            "SELECT agent FROM room_seats WHERE room_id = ? ORDER BY position, agent",
+            (room_id,))]
+
+    def set_room_team(self, room_id: int, agents: Iterable[str], actor: str) -> list[str]:
+        """Redefine the room's team. A person only, and only over real seats.
+
+        Deliberately a replacement rather than a merge: `/seats add` on a single
+        meeting is the temporary gesture, and this is the one that sticks. Two
+        commands that both half-change a roster is how you end up unable to say
+        what the team is.
+        """
+        if not self.is_human(actor):
+            raise NotAuthorised(f"{actor!r} is not a human seat; a person sets the team")
+        wanted = list(dict.fromkeys(agents))
+        for name in wanted:
+            self.agent(name)                     # raises if it is not a seat
+        with self.tx() as c:
+            c.execute("DELETE FROM room_seats WHERE room_id = ?", (room_id,))
+            for slot, name in enumerate(wanted):
+                c.execute("INSERT INTO room_seats (room_id, agent, position) "
+                          "VALUES (?,?,?)", (room_id, name, slot))
+        return wanted
 
     # ------------------------------------------------------------------ pairing
 
