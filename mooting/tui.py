@@ -485,6 +485,13 @@ class MootApp(App):
             # which has none of these widgets. The timer kept firing behind the
             # model picker and raised NoMatches a second after it opened.
             return
+        if not self.query("#seats"):
+            # The same failure from the other end: the poll interval can fire
+            # before compose has mounted the panes, and again while the app is
+            # tearing down. Rare enough to look like a flake and it is not one --
+            # it took the Windows 3.10 job on CI. A repaint that cannot find its
+            # widgets has nothing to repaint, and raising here kills the timer.
+            return
         store = self.board.store
         if self.board.topic_id is None:
             self.query_one("#seats", DataTable).clear()
