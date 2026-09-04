@@ -133,7 +133,9 @@ FRAMING = {
         "an acceptance line, so 'done' is checkable rather than a matter of "
         "opinion. Nothing runs until a human approves your plan, so put the whole "
         "plan up at once. When work comes back, review it and use "
-        "`mooting_task_update(id, \"accepted\"|\"rejected\", why)`."
+        "`mooting_task_update(id, \"accepted\"|\"assigned\"|\"rejected\", why)` -- "
+        "`assigned` sends it back to be done again, and `rejected` abandons it "
+        "for good."
     ),
     "discuss": (
         "**This is a working discussion, not a debate.** Build on what others have "
@@ -518,9 +520,17 @@ class Supervisor:
             manager = self._manager(topic_id)
             reviewable = [t for t in self.store.tasks(topic_id)
                           if t["status"] in {"done", "blocked"}]
-            if reviewable and manager and self._has_budget(topic_id, manager):
-                await self.wake_seat(topic_id, manager)
-                continue
+            if reviewable and manager:
+                if self._has_budget(topic_id, manager):
+                    await self.wake_seat(topic_id, manager)
+                    continue
+                # A task nobody can rule on is the same class of problem as a task
+                # nobody can do, and that one already says so. Silence here made
+                # an exhausted manager look like a successful run that did
+                # nothing: the only way to see it was to read `_has_budget`.
+                self._say_once(topic_id, f"budget:{manager}",
+                               f"{manager} has {len(reviewable)} task(s) to rule on "
+                               f"and no turns left. `/rounds <n>` grants more.")
 
             # 4. Drafts the manager wrote go to the human as one plan.
             if self.store.tasks(topic_id, status="draft"):
@@ -529,13 +539,30 @@ class Supervisor:
                 return f"work plan #{pid} awaits your approval"
 
             # 5. Nothing planned yet: the manager plans.
-            if not self.store.tasks(topic_id) and manager and self._has_budget(topic_id, manager):
-                await self.wake_seat(topic_id, manager)
-                continue
+            if not self.store.tasks(topic_id) and manager:
+                if self._has_budget(topic_id, manager):
+                    await self.wake_seat(topic_id, manager)
+                    continue
+                self._say_once(topic_id, f"budget:{manager}",
+                               f"{manager} has nothing planned yet and no turns "
+                               f"left. `/rounds <n>` grants more.")
 
             reason = self._human_ask_reason(topic_id) or self._work_summary(topic_id)
             self._park(topic_id, reason)
             return reason
+
+    def _say_once(self, topic_id: int, key: str, note: str) -> None:
+        """Post a notice, unless the same one is already the last thing said.
+
+        The loop reaches these branches every pass, and a stall repeated once a
+        second is noise rather than a message.
+        """
+        recent = self.store.transcript(topic_id, limit=6, newest=True)
+        marker = f"[{key}] "
+        if any(m["body"].startswith(marker) for m in recent):
+            return
+        self.store.post(topic_id, "mooting", f"{marker}{note}", kind="system",
+                        count_turn=False)
 
     def _manager(self, topic_id: int) -> str | None:
         for s in self.store.seats(topic_id):
@@ -739,9 +766,19 @@ class Supervisor:
         counts: dict[str, int] = {}
         for t in tasks:
             counts[t["status"]] = counts.get(t["status"], 0) + 1
-        if set(counts) <= {"accepted"}:
-            return f"work complete -- {counts.get('accepted', 0)} task(s) accepted"
-        return "work paused: " + ", ".join(f"{n} {st}" for st, n in sorted(counts.items()))
+        # Rejected is a decision, not an outstanding item: the manager abandoned
+        # it and nothing reads it again. Counting it as work left over reported a
+        # settled plan as "work paused: 6 rejected", which reads like six
+        # failures rather than six calls somebody made.
+        settled = {"accepted", "rejected"}
+        if set(counts) <= settled:
+            done = ", ".join(f"{counts[st]} {st}" for st in sorted(counts))
+            return f"work complete -- {done}"
+        left = {st: n for st, n in counts.items() if st not in settled}
+        summary = "work paused: " + ", ".join(f"{n} {st}" for st, n in sorted(left.items()))
+        if "rejected" in counts:
+            summary += f" ({counts['rejected']} abandoned earlier)"
+        return summary
 
     # ------------------------------------------------------------- turn-taking
 
@@ -1023,7 +1060,9 @@ class Supervisor:
                f"who has not spoken."] if seated_chair else []),
             *(["- `mooting_assign(topic, agent, title, body, acceptance)` — draft a task (manager only).",
                "- `mooting_tasks(topic)` — the current plan and its state.",
-               "- `mooting_task_update(task_id, status, result)` — `accepted` / `rejected` on finished work."]
+               "- `mooting_task_update(task_id, status, result)` — your verdict on "
+               "finished or blocked work: `accepted` closes it, `assigned` sends "
+               "it back to be done again, `rejected` abandons it for good."]
               if topic["mode"] == "work" else []),
             "- `mooting_vote(proposal_id, stance, rationale)` — `support` / `object` / `abstain`.",
             "- `mooting_pass(topic, why)` — nothing to add. Passing is a real answer; say so and stop.",

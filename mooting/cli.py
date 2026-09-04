@@ -501,11 +501,18 @@ def cmd_run(args) -> int:
     if args.resume:
         board.set_topic_status(int(t["id"]), "open", _human(board, args.as_), "resumed by human")
         if args.rounds:
-            with board.tx() as c:
-                c.execute("UPDATE topics SET max_rounds = max_rounds + ? WHERE id = ?",
-                          (args.rounds, int(t["id"])))
+            # `grant_rounds` exists for exactly this and its docstring names the
+            # trap: raising rounds without the turns to use them leaves a council
+            # that looks alive and says nothing. The raw UPDATE here raised one
+            # of the two, and skipped the identity check as well, so
+            # `--as <agent> --resume --rounds N` let a seat grant itself more.
+            board.grant_rounds(int(t["id"]), args.rounds, _human(board, args.as_))
 
-    caps = Caps(max_turns_per_seat=args.max_turns, max_wakes_per_agent_per_hour=args.max_wakes,
+    # Whatever the seats actually hold, unless this run says lower.
+    seated = [r["max_turns"] for r in board.seats(int(t["id"]))]
+    ceiling = args.max_turns if args.max_turns is not None else (
+        max(seated) if seated else Caps.max_turns_per_seat)
+    caps = Caps(max_turns_per_seat=ceiling, max_wakes_per_agent_per_hour=args.max_wakes,
                 effort=args.effort or "low")
     sup = Supervisor(board, _drivers(board), caps,
                      turn_taking="sequential" if args.sequential else "concurrent")
@@ -882,7 +889,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("topic")
     p.add_argument("--resume", action="store_true", help="unpause first")
     p.add_argument("--rounds", type=int, default=0, help="with --resume: grant N more rounds")
-    p.add_argument("--max-turns", type=int, default=6, dest="max_turns")
+    # No default. This is a `min()` against the seat's own budget, so a number
+    # here can only ever lower it -- and a default of 6 silently overrode a
+    # budget the chair had deliberately granted, on a flag they never passed.
+    p.add_argument("--max-turns", type=int, default=None, dest="max_turns",
+                   help="lower the per-seat ceiling for this run; the seat's own "
+                        "budget applies when this is not given")
     p.add_argument("--max-wakes", type=int, default=30, dest="max_wakes",
                    help="per agent per hour; a failed wake still counts")
     p.add_argument("--effort", choices=["low", "medium", "high"],

@@ -1811,7 +1811,12 @@ class Store:
         """A worker reports on its own task; a manager rules on a finished one."""
         t = self.task(task_id)
         worker_states = {"in_progress", "done", "blocked"}
-        manager_states = {"accepted", "rejected"}
+        # `assigned` puts it back in the queue. Without it the verdict a manager
+        # most needs after a blocked task whose cause has been fixed -- do it
+        # again -- was the one thing the state machine could not say, and using
+        # `rejected` for it dropped the task out of every code path: neither
+        # `_runnable_tasks` nor the review step reads that state.
+        manager_states = {"accepted", "rejected", "assigned"}
         if status not in worker_states | manager_states:
             raise StoreError(f"bad task status {status!r}")
         if status in worker_states and agent != t["assignee"]:

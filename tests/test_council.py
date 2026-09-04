@@ -1843,3 +1843,101 @@ def test_the_version_has_one_answer():
 
     assert mooting.__version__ == importlib.metadata.version("mooting")
     assert mooting.__version__ != "0.0.1", "the hand-maintained literal is back"
+
+
+# ------------------------------------------------------------- issues #4, #5
+
+
+def _work_board(board):
+    topic = open_debate(board)
+    with board.tx() as c:
+        c.execute("UPDATE topics SET mode = 'work' WHERE id = ?", (topic,))
+        c.execute("UPDATE seats SET role = 'manager' WHERE topic_id = ? AND agent = 'claude'",
+                  (topic,))
+    return topic
+
+
+def _task(board, topic, status="assigned", title="Do the thing"):
+    with board.tx() as c:
+        cur = c.execute("INSERT INTO tasks (topic_id, title, assignee, created_by, status) "
+                        "VALUES (?,?,?,?,?)", (topic, title, "codex", "claude", status))
+        return int(cur.lastrowid)
+
+
+def test_granting_rounds_raises_the_turns_to_use_them(board):
+    """#4. The resume path raised one of the two with a raw UPDATE, so a council
+    with spent seats looked alive and said nothing."""
+    topic = open_debate(board)
+    with board.tx() as c:
+        c.execute("UPDATE seats SET turns_used = max_turns WHERE topic_id = ?", (topic,))
+
+    before = {r["agent"]: r["max_turns"] for r in board.seats(topic)}
+    board.grant_rounds(topic, 4, "human")
+    after = {r["agent"]: r["max_turns"] for r in board.seats(topic)}
+
+    assert board.topic(topic)["max_rounds"] > 3
+    assert all(after[a] == before[a] + 4 for a in before), "turns did not follow rounds"
+
+
+def test_a_seat_cannot_grant_the_council_more_rounds(board):
+    """The raw UPDATE had no identity check, so `--as <agent> --resume --rounds`
+    let a seat top up its own budget."""
+    topic = open_debate(board)
+    with pytest.raises(NotAuthorised):
+        board.grant_rounds(topic, 4, "claude")
+
+
+def test_a_manager_can_send_work_back_to_the_queue(board):
+    """#5. `rejected` was the only way to say "do it again", and it dropped the
+    task out of every code path that reads one."""
+    topic = _work_board(board)
+    tid = _task(board, topic, status="blocked")
+
+    board.update_task(tid, "claude", "assigned", "the cause is fixed, please rerun")
+
+    assert board.task(tid)["status"] == "assigned"
+    queued = [t["id"] for t in board.tasks(topic, status="assigned")]
+    assert tid in queued, "the task did not come back to the queue"
+
+
+def test_rejecting_is_still_terminal(board):
+    """It should mean abandoned, which is why it needed a sibling."""
+    topic = _work_board(board)
+    tid = _task(board, topic, status="done")
+
+    board.update_task(tid, "claude", "rejected", "not worth doing after all")
+    assert board.tasks(topic, status="assigned") == []
+
+
+def test_a_decided_task_is_not_reported_as_work_left_over(board):
+    """`work paused: 6 rejected` read like six failures rather than six calls."""
+    from mooting.supervisor import Caps, Supervisor
+
+    topic = _work_board(board)
+    for _ in range(3):
+        board.update_task(_task(board, topic, status="done"), "claude", "rejected", "no")
+    sup = Supervisor(board, {}, Caps())
+
+    summary = sup._work_summary(topic)
+    assert "paused" not in summary, summary
+    assert "3 rejected" in summary
+
+    _task(board, topic, status="assigned")
+    summary = sup._work_summary(topic)
+    assert "1 assigned" in summary
+    assert "abandoned earlier" in summary, "the abandoned ones were counted as pending"
+
+
+def test_copilot_never_sends_effort_with_the_auto_model(board):
+    """#4, separately. `auto` rejects the flag and fails every wake, and it is
+    the cheap default a person would reasonably name."""
+    from mooting.drivers.base import Seat
+    from mooting.drivers.spawn import CopilotDriver
+
+    driver = CopilotDriver(board.path)
+    for model, expect in ((None, []), ("", []), ("auto", []),
+                          ("claude-opus-4.8", ["--effort", "low"])):
+        seat = Seat(topic_id=1, topic_slug="t", agent="copilot", kind="copilot",
+                    cli_session=None, cfg={"model": model} if model is not None else {},
+                    effort="low")
+        assert driver.effort_argv(seat) == expect, model

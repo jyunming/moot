@@ -268,7 +268,12 @@ def mooting_task_update(task_id: int, status: str, result: str = "") -> str:
     changed and where, or precisely what stopped you -- your report is all the
     manager and the human will see.
 
-    As the manager: `accepted` or `rejected`, with the reason.
+    As the manager, with the reason:
+    `accepted`  the work is done and closes.
+    `assigned`  send it back to be done again -- use this when a blocked task's
+                cause has been fixed. It returns to the queue.
+    `rejected`  abandon it. Terminal: nothing reads a rejected task again, so it
+                is not the way to ask for a retry.
     """
     try:
         board().update_task(task_id, AGENT, status, result)
