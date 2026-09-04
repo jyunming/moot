@@ -1941,3 +1941,70 @@ def test_copilot_never_sends_effort_with_the_auto_model(board):
                     cli_session=None, cfg={"model": model} if model is not None else {},
                     effort="low")
         assert driver.effort_argv(seat) == expect, model
+
+
+# ------------------------------------------------- what the review found (#3)
+
+
+def test_http_is_on_this_machine_too(board):
+    """The executing-seat guard ran only for the terminal, so the same window
+    reopened through the server: a seat with a shell can read a token off the
+    board and make the request itself."""
+    topic = open_debate(board)
+    pid = board.propose(topic, "claude", "Cap at 6", "body")
+    work = board.open_topic("w", "W", "b", "human", seats=("human", "claude"))
+    with board.tx() as c:
+        c.execute("UPDATE topics SET mode = 'work' WHERE id = ?", (work,))
+        c.execute("INSERT INTO tasks (topic_id, title, assignee, created_by, status) "
+                  "VALUES (?,?,?,?,'in_progress')", (work, "t", "claude", "human"))
+
+    for route in ("local", "http"):
+        with pytest.raises(NotAuthorised):
+            board.decide(pid, "human", approve=True, via=route)
+    # A chat is genuinely elsewhere: the bot token lets a seat speak as the bot,
+    # not as a paired person, and the sender is what the decide path checks.
+    board.decide(pid, "human", approve=True, rationale="from my phone", via="telegram")
+    assert board.proposal(pid)["status"] == "approved"
+
+
+def test_a_handle_is_worth_guessing_at(board):
+    """24 bits is cheap online and collides on a board that lives a while."""
+    from mooting.store import HANDLE_BYTES, new_handle
+
+    assert HANDLE_BYTES >= 4
+    handles = {new_handle() for _ in range(500)}
+    assert len(handles) == 500, "handles collided in five hundred draws"
+    assert all(len(h) == HANDLE_BYTES * 2 for h in handles)
+
+
+def test_a_terminal_sees_the_whole_board(board):
+    """`None` asks as the terminal, and it administers the rooms."""
+    room = board.ensure_room("telegram", "-100111")
+    mine = board.open_topic("in-a-chat", "In a chat", "b", "human",
+                            seats=("claude",), room_id=room)
+    board.open_topic("at-the-desk", "At the desk", "b", "human", seats=("claude",))
+
+    seen = {t["slug"] for t in board.topics_for_room(None)}
+    assert seen == {"in-a-chat", "at-the-desk"}, seen
+    assert board.topic_visible_in(mine, None), "the terminal could not see a chat's topic"
+
+
+def test_a_room_still_sees_only_its_own(board):
+    room = board.ensure_room("telegram", "-100111")
+    other = board.ensure_room("telegram", "-100222")
+    board.open_topic("theirs", "Theirs", "b", "human", seats=("claude",), room_id=other)
+
+    seen = {t["slug"] for t in board.topics_for_room(room)}
+    assert "theirs" not in seen
+
+
+def test_a_room_cannot_answer_a_request_by_its_number(board):
+    """Accepting the id inside a room left the sequence guessable, which is what
+    the handle was added to stop."""
+    pid = board.pair_request("-100111", "42", "Someone")
+    row = board.pairing("-100111", "42")
+
+    assert board.pairing_by_ref(row["ref"], chat_id="-100111") is not None
+    assert board.pairing_by_ref(str(pid), chat_id="-100111") is None
+    # A terminal may still use the number: it sees the whole board regardless.
+    assert board.pairing_by_ref(str(pid)) is not None

@@ -170,6 +170,22 @@ def clean_text(value: str, what: str) -> str:
     return value
 
 
+#: Routes that cannot be reached from the machine the board lives on. A seat
+#: holding a shell can type in a terminal and can call an HTTP port; it cannot
+#: be a paired person in a chat.
+ON_ANOTHER_MACHINE = frozenset({"telegram"})
+
+#: Bytes behind a handle somebody types. Four rather than three: a pairing
+#: handle is the thing that stands between a stranger and a seat, and 24 bits is
+#: cheap to guess at online and starts colliding on a board that lives a while.
+HANDLE_BYTES = 4
+
+
+def new_handle() -> str:
+    """A handle short enough to retype and long enough to be worth nothing."""
+    return secrets.token_hex(HANDLE_BYTES)
+
+
 def chain_hash(prev: str | None, eid: int, topic_id, kind: str, actor: str,
                payload: str, created_at: str) -> str:
     """One link. Covers the row and the link before it, so an edit anywhere
@@ -326,7 +342,7 @@ class Store:
         for row in self._conn.execute(
                 "SELECT id FROM pairings WHERE ref IS NULL OR ref = ''").fetchall():
             self._conn.execute("UPDATE pairings SET ref = ? WHERE id = ?",
-                               (secrets.token_hex(3), row["id"]))
+                               (new_handle(), row["id"]))
 
     def _backfill_asking(self) -> None:
         """Decide, for mentions written before the column existed, which were asks.
@@ -731,7 +747,7 @@ class Store:
         """
         if not self.is_human(by):
             raise NotAuthorised(f"{by!r} is not a human seat; only a human closes a meeting")
-        if via == "local" and self.executing_now():
+        if via not in ON_ANOTHER_MACHINE and self.executing_now():
             raise NotAuthorised(
                 "a seat is executing and holds a shell on this machine; conclude "
                 "from a chat, or wait for it to finish")
@@ -1032,14 +1048,18 @@ class Store:
         on one board from reading each other.
         """
         if room_id is None:
-            return self.q("SELECT * FROM topics WHERE room_id IS NULL ORDER BY id DESC")
+            # A terminal is the machine the board lives on, so it sees the whole
+            # board. Returning only the unbound ones hid every meeting opened in
+            # a chat from the one place that administers them.
+            return self.q("SELECT * FROM topics ORDER BY id DESC")
         return self.q("SELECT * FROM topics WHERE room_id IS NULL OR room_id = ? "
                       "ORDER BY id DESC", (room_id,))
 
     def topic_visible_in(self, topic_id: int | None, room_id: int | None) -> bool:
         """Whether a room may be told about something that happened on a topic."""
-        if topic_id is None:
-            return True                      # board-level, belongs to nobody
+        if topic_id is None or room_id is None:
+            # None asks as the terminal, which sees everything.
+            return True
         row = self.q1("SELECT room_id FROM topics WHERE id = ?", (topic_id,))
         if row is None or row["room_id"] is None:
             return True
@@ -1094,7 +1114,7 @@ class Store:
             raise NotAuthorised(f"{seat!r} is not a human seat")
         import time
 
-        code = secrets.token_hex(3)
+        code = new_handle()
         self.set_setting("claim.code", code)
         self.set_setting("claim.seat", seat)
         self.set_setting("claim.expires",
@@ -1161,7 +1181,7 @@ class Store:
             c.execute(
                 "INSERT OR IGNORE INTO pairings (channel, chat_id, user_id, display, ref) "
                 "VALUES (?, ?, ?, ?, ?)",
-                (channel, str(chat_id), str(user_id), display, secrets.token_hex(3)))
+                (channel, str(chat_id), str(user_id), display, new_handle()))
         row = self.pairing(chat_id, user_id, channel)
         return int(row["id"])
 
@@ -1246,12 +1266,16 @@ class Store:
         joins *this* council, and a request from another room is not this room's
         to answer.
         """
-        sql = "SELECT * FROM pairings WHERE (ref = ? OR CAST(id AS TEXT) = ?)"
-        args = [str(ref).strip().lower(), str(ref).strip()]
-        if chat_id is not None:
-            sql += " AND channel = ? AND chat_id = ?"
-            args += [channel, str(chat_id)]
-        return self.q1(sql + " LIMIT 1", args)
+        # The number is accepted only from a terminal, where the operator can see
+        # the whole board anyway. Inside a room it would leave the sequence
+        # guessable, which is the thing the handle was added to stop.
+        if chat_id is None:
+            return self.q1(
+                "SELECT * FROM pairings WHERE ref = ? OR CAST(id AS TEXT) = ? LIMIT 1",
+                [str(ref).strip().lower(), str(ref).strip()])
+        return self.q1(
+            "SELECT * FROM pairings WHERE ref = ? AND channel = ? AND chat_id = ? "
+            "LIMIT 1", [str(ref).strip().lower(), channel, str(chat_id)])
 
     def seat_for_chat(self, chat_id: str, user_id: str,
                       channel: str = "telegram") -> str | None:
@@ -1659,7 +1683,12 @@ class Store:
         # Not a fence around the machine, which is not this project's to build.
         # It closes the one window this project opens itself, and it names the
         # way out: a chat account is something the seat does not hold.
-        running = self.executing_now() if via == "local" else []
+        # Anything reachable from this machine, which is HTTP as well as the
+        # terminal: a seat with a shell can read a token off the board and make
+        # the same request. Only a chat is genuinely elsewhere -- the bot token
+        # lets a seat speak *as the bot*, not as a paired person, and the sender
+        # is what the decide path checks.
+        running = [] if via in ON_ANOTHER_MACHINE else self.executing_now()
         if running:
             work = running[0]
             raise NotAuthorised(
