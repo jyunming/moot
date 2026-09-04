@@ -43,6 +43,19 @@ CATCHUP_EVENTS = 200
 #: council averaged.
 WORDS_BY_EFFORT = {"low": 80, "medium": 130, "high": 200}
 
+#: How big a meeting is, by the same dial. Effort already said how long a seat
+#: thinks and how much it may say; a question worth deep thinking is usually
+#: worth more of it, and a quick second opinion is not worth five rounds. One
+#: dial for "how much is this worth" beats three numbers nobody tunes.
+#:
+#: Raising only. `low` on a topic somebody deliberately granted ten rounds must
+#: not take them away -- the same rule `set_rounds` has always had.
+BUDGET_BY_EFFORT = {
+    "low":    {"rounds": 2, "turns": 2},
+    "medium": {"rounds": 3, "turns": 3},
+    "high":   {"rounds": 5, "turns": 5},
+}
+
 
 def _attachment_section(store, topic_id: int, budget: int) -> list[str]:
     """Source material, put where every seat can actually reach it.

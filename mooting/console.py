@@ -515,10 +515,14 @@ class Console:
             return
         """The brainstorming dial: cheap and wide, then deep on what survived."""
         if rest not in {"low", "medium", "high"}:
+            from .supervisor import BUDGET_BY_EFFORT, WORDS_BY_EFFORT
+
             self.emit(f"  effort is {BOLD}{self.effort()}{RESET}   "
                   f"{DIM}/effort low|medium|high{RESET}")
-            self.emit(f"  {DIM}low ≈ 9x faster and thinner; high for a call that turns on "
-                  f"catching a flaw{RESET}")
+            for level, budget in BUDGET_BY_EFFORT.items():
+                self.emit(f"  {DIM}{level:<7} {budget['rounds']} rounds, "
+                          f"{budget['turns']} turns each, "
+                          f"under {WORDS_BY_EFFORT[level]} words a turn{RESET}")
             return
         with self.store.tx() as c:
             c.execute("UPDATE topics SET effort = ? WHERE id = ?", (rest, self.topic_id))
@@ -526,8 +530,16 @@ class Console:
         # once, but wake_seat re-reads the topic row every time and topic effort
         # outranks the council default. A concurrent round's wakes all start
         # together, so the change lands on the round after the current one.
+        # One dial: how long they think, how much they may say, and how big the
+        # meeting is. Raising only, so a budget granted on purpose survives.
+        from .supervisor import BUDGET_BY_EFFORT
+
+        budget = BUDGET_BY_EFFORT[rest]
+        rounds, turns = self.store.raise_budget(
+            self.topic_id, budget["rounds"], budget["turns"], self.me)
         when = " — from the next round" if self.driving.is_set() else ""
         self.emit(f"{DIM}council effort → {rest}{when}{RESET}")
+        self.emit(f"  {DIM}{rounds} rounds, {turns} turns each{RESET}")
 
     def _asks(self, _: str) -> None:
         if not self._require_topic():

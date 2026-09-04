@@ -1610,3 +1610,58 @@ def test_the_ledger_keeps_what_it_was_told_and_nothing_else(board):
     assert by["claude"]["cost_usd"] == 0.0412
     assert by["codex"]["tokens_in"] is None, "a silent CLI was recorded as zero"
     assert by["codex"]["cost_usd"] is None
+
+
+# ------------------------------------------------------- effort is the dial
+#
+# One setting for "how much is this question worth": how long a seat thinks,
+# how much it may say, and how big the meeting is. Three numbers nobody tunes
+# become one somebody already understands.
+
+
+def test_the_dial_moves_the_budget_with_it(board):
+    from mooting.supervisor import BUDGET_BY_EFFORT
+
+    topic = open_debate(board, max_rounds=1)
+    high = BUDGET_BY_EFFORT["high"]
+
+    rounds, turns = board.raise_budget(topic, high["rounds"], high["turns"], "human")
+    assert rounds == high["rounds"]
+    assert turns == high["turns"]
+    assert board.topic(topic)["max_rounds"] == high["rounds"]
+
+
+def test_a_budget_granted_on_purpose_survives_a_lower_setting(board):
+    """`set_rounds` has always refused to reduce, and the dial follows it."""
+    from mooting.supervisor import BUDGET_BY_EFFORT
+
+    topic = open_debate(board)
+    board.set_rounds(topic, 12, "human")
+
+    low = BUDGET_BY_EFFORT["low"]
+    rounds, turns = board.raise_budget(topic, low["rounds"], low["turns"], "human")
+
+    assert rounds == 12, "a lower setting took back what was granted"
+    assert turns == 12
+    assert all(r["max_turns"] >= 12 for r in board.seats(topic))
+
+
+def test_only_a_person_turns_the_dial(board):
+    from mooting.supervisor import BUDGET_BY_EFFORT
+
+    topic = open_debate(board)
+    high = BUDGET_BY_EFFORT["high"]
+    with pytest.raises(NotAuthorised):
+        board.raise_budget(topic, high["rounds"], high["turns"], "claude")
+
+
+def test_more_effort_is_never_a_smaller_meeting():
+    """The dial has to be monotonic or it is not one dial."""
+    from mooting.supervisor import BUDGET_BY_EFFORT, WORDS_BY_EFFORT
+
+    order = ("low", "medium", "high")
+    for name in ("rounds", "turns"):
+        got = [BUDGET_BY_EFFORT[e][name] for e in order]
+        assert got == sorted(got), f"{name} is not monotonic: {got}"
+    words = [WORDS_BY_EFFORT[e] for e in order]
+    assert words == sorted(words), words

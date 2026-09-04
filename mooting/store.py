@@ -570,6 +570,27 @@ class Store:
             c.execute("UPDATE seats SET max_turns = MAX(max_turns, ?) WHERE topic_id = ?",
                       (n, topic_id))
 
+    def raise_budget(self, topic_id: int, rounds: int, turns: int,
+                     actor: str) -> tuple[int, int]:
+        """Bring a topic up to a budget, never down. Returns what it now holds.
+
+        Used when the chair turns the effort dial: a question worth deep thinking
+        is usually worth more rounds, and one worth a quick answer is not worth
+        five. Raising only, for the reason `set_rounds` has always given -- a
+        budget somebody granted on purpose is not something a later setting
+        should quietly take back.
+        """
+        if not self.is_human(actor):
+            raise NotAuthorised(f"{actor!r} may not change the budget")
+        with self.tx() as c:
+            c.execute("UPDATE topics SET max_rounds = MAX(max_rounds, ?) WHERE id = ?",
+                      (rounds, topic_id))
+            c.execute("UPDATE seats SET max_turns = MAX(max_turns, ?) WHERE topic_id = ?",
+                      (turns, topic_id))
+        t = self.topic(topic_id)
+        held = [r["max_turns"] for r in self.seats(topic_id)]
+        return int(t["max_rounds"]), max(held) if held else turns
+
     def grant_rounds(self, topic_id: int, n: int, actor: str) -> None:
         """More rounds, and the per-seat turns to use them. A person only.
 
