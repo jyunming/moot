@@ -173,6 +173,39 @@ def context_leaks(cwd: str) -> list[str]:
     return found
 
 
+def report_record(board: Store) -> int:
+    """Whether the record still says what it said. Returns the fault count.
+
+    Three things, because tampering has three places to hide: the chain of
+    events, the message bodies they announced, and the verdict column beside a
+    proposal. An intact chain with a rewritten `decided_by` is the failure this
+    project would care about most, and checking only the chain would miss it.
+    """
+    chain = board.verify_chain()
+    bodies = board.verify_bodies()
+    decisions = board.verify_decisions()
+
+    if chain["unchained"]:
+        print(f"  {chain['unchained']} event(s) predate the chain and cannot be "
+              f"checked; history is not made tamper-evident afterwards")
+    if chain["ok"]:
+        print(f"  chain     {chain['checked']} event(s) verify")
+    else:
+        print(f"  chain     BREAKS at event {chain['broken_at']} "
+              f"({chain['checked']} checked)")
+    if bodies:
+        print(f"  messages  {len(bodies)} no longer match what was announced: "
+              f"{bodies[:5]}")
+    else:
+        print("  messages  every body matches the event that announced it")
+    for bad in decisions:
+        print(f"  sign-off  proposal {bad['proposal_id']} records "
+              f"{bad['found']!r}; the event says {bad['expected']!r}")
+    if not decisions:
+        print("  sign-off  every decision matches the event that recorded it")
+    return (0 if chain["ok"] else 1) + len(bodies) + len(decisions)
+
+
 def report_context(board: Store, seats) -> int:
     """Warn about seats that would read somebody's notes into a council."""
     import json
@@ -214,6 +247,8 @@ async def run_doctor(board: Store, only: str | None = None, timeout: float = 180
     # way no probe would show, because the wake succeeds and the answer is good.
     if report_context(board, seats):
         print()
+    faults = report_record(board)
+    print()
     print(f"probing {len(seats)} seat(s); each spends one real turn on that CLI.\n")
 
     # Sequential on purpose: a parallel probe makes a rate-limit look like a bug.
@@ -229,4 +264,6 @@ async def run_doctor(board: Store, only: str | None = None, timeout: float = 180
         print("and the supervisor records the failed wake rather than stalling the topic.")
     else:
         print(f"all {len(probes)} seat(s) reached the board.")
-    return 1 if failed else 0
+    if faults:
+        print(f"and the record does not verify: {faults} fault(s) above.")
+    return 1 if (failed or faults) else 0

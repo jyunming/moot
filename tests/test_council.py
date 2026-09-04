@@ -1665,3 +1665,103 @@ def test_more_effort_is_never_a_smaller_meeting():
         assert got == sorted(got), f"{name} is not monotonic: {got}"
     words = [WORDS_BY_EFFORT[e] for e in order]
     assert words == sorted(words), words
+
+
+# ------------------------------------------------------------- the record
+#
+# The board says who signed off. Until now nothing made that record answer back
+# when somebody edited it, so "you can prove it" was a claim about the design
+# rather than about the file.
+
+
+def _tamper(board, sql, args=()):
+    """Edit the board the way somebody with the file would: behind its back."""
+    import sqlite3
+
+    path = board.path
+    raw = sqlite3.connect(path)
+    raw.execute(sql, args)
+    raw.commit()
+    raw.close()
+
+
+def test_a_clean_board_verifies(board):
+    topic = open_debate(board)
+    board.post(topic, "claude", "split units win", count_turn=False)
+    pid = board.propose(topic, "claude", "Adopt them", "body")
+    board.decide(pid, "human", approve=True, rationale="agreed")
+
+    chain = board.verify_chain()
+    assert chain["ok"] and chain["unchained"] == 0
+    assert chain["checked"] > 0
+    assert board.verify_bodies() == []
+    assert board.verify_decisions() == []
+
+
+def test_rewriting_a_message_stops_matching(board):
+    """The body lives in another table, so the chain alone would not notice."""
+    topic = open_debate(board)
+    board.post(topic, "claude", "split units win", count_turn=False)
+
+    _tamper(board, "UPDATE messages SET body = 'split units are a scam' "
+                   "WHERE body = 'split units win'")
+
+    assert board.verify_chain()["ok"], "the chain covers events, not bodies"
+    assert board.verify_bodies(), "a rewritten body went unnoticed"
+
+
+def test_rewriting_who_signed_off_stops_matching(board):
+    """The one act this project exists to attribute, in a column beside the chain."""
+    topic = open_debate(board)
+    pid = board.propose(topic, "claude", "Adopt them", "body")
+    board.decide(pid, "human", approve=True, rationale="agreed")
+
+    _tamper(board, "UPDATE proposals SET decided_by = 'claude' WHERE id = ?", (pid,))
+
+    assert board.verify_chain()["ok"], "an intact chain is not a verified record"
+    wrong = board.verify_decisions()
+    assert wrong and wrong[0]["expected"] == "human" and wrong[0]["found"] == "claude"
+
+
+def test_removing_an_event_breaks_the_chain(board):
+    topic = open_debate(board)
+    for i in range(4):
+        board.post(topic, "claude", f"point {i}", count_turn=False)
+    victim = [e.id for e in board.events_since(0, topic)][2]
+
+    _tamper(board, "DELETE FROM events WHERE id = ?", (victim,))
+
+    chain = board.verify_chain()
+    assert not chain["ok"], "a deleted event left the chain adding up"
+    assert chain["broken_at"] > victim
+
+
+def test_editing_an_event_breaks_the_chain_from_there(board):
+    topic = open_debate(board)
+    for i in range(3):
+        board.post(topic, "claude", f"point {i}", count_turn=False)
+    target = [e.id for e in board.events_since(0, topic)][1]
+
+    _tamper(board, "UPDATE events SET actor = 'somebody else' WHERE id = ?", (target,))
+
+    chain = board.verify_chain()
+    assert not chain["ok"]
+    assert chain["broken_at"] == target
+
+
+def test_events_written_before_the_chain_are_reported_not_hidden(board):
+    """History cannot be made tamper-evident afterwards, and saying so is the
+    difference between a check and a decoration."""
+    topic = open_debate(board)
+    board.post(topic, "claude", "written before the column existed",
+               count_turn=False)
+
+    # What an existing board looks like the moment the column is added: nothing
+    # written so far carries a link, and everything after it does.
+    _tamper(board, "UPDATE events SET hash = NULL")
+    board.post(topic, "claude", "written after", count_turn=False)
+
+    chain = board.verify_chain()
+    assert chain["unchained"] >= 2, "the old rows were not reported as unchecked"
+    assert chain["checked"] >= 1
+    assert chain["ok"], "an unchained prefix is not a broken chain"

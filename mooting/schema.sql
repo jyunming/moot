@@ -127,6 +127,11 @@ CREATE TABLE IF NOT EXISTS events (
     kind        TEXT NOT NULL,              -- message|proposal|decision|seat|topic
     actor       TEXT NOT NULL,
     payload     TEXT NOT NULL DEFAULT '{}', -- JSON
+    -- Each event chained to the one before it. The board records who signed off;
+    -- this is what makes that record answer back when somebody edits it, rather
+    -- than merely stating it. NULL on rows written before the chain began, which
+    -- is reported as such: history cannot be made tamper-evident afterwards.
+    hash        TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_events_topic ON events(topic_id, id);

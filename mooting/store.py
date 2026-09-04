@@ -149,6 +149,15 @@ class StoreError(RuntimeError):
     pass
 
 
+def chain_hash(prev: str | None, eid: int, topic_id, kind: str, actor: str,
+               payload: str, created_at: str) -> str:
+    """One link. Covers the row and the link before it, so an edit anywhere
+    downstream stops matching from that point on."""
+    material = "\x1f".join([prev or "", str(eid), str(topic_id), kind, actor,
+                            payload, created_at or ""])
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 class NotAuthorised(StoreError):
     """Raised when a seat tries to exercise a power it does not hold."""
 
@@ -278,6 +287,7 @@ class Store:
                                    ("pairings", "ref", "TEXT"),
                                    ("agents", "tg_user_id", "TEXT"),
                                    ("mentions", "asking", "INTEGER NOT NULL DEFAULT 1"),
+                                   ("events", "hash", "TEXT"),
                                    ("wakes", "tokens_in", "INTEGER"),
                                    ("wakes", "tokens_out", "INTEGER"),
                                    ("wakes", "cost_usd", "REAL"),
@@ -321,11 +331,24 @@ class Store:
         actor: str,
         payload: dict[str, Any] | None = None,
     ) -> int:
+        body = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)
         cur = conn.execute(
             "INSERT INTO events (topic_id, kind, actor, payload) VALUES (?,?,?,?)",
-            (topic_id, kind, actor, json.dumps(payload or {}, ensure_ascii=False)),
+            (topic_id, kind, actor, body),
         )
-        return int(cur.lastrowid)
+        eid = int(cur.lastrowid)
+        # Chained in the same transaction as the row it covers, so an event and
+        # its link are never separately true. The previous link comes from the
+        # board rather than from memory: two processes write here.
+        row = conn.execute(
+            "SELECT created_at FROM events WHERE id = ?", (eid,)).fetchone()
+        prev = conn.execute(
+            "SELECT hash FROM events WHERE id < ? ORDER BY id DESC LIMIT 1",
+            (eid,)).fetchone()
+        link = chain_hash(prev["hash"] if prev else None, eid, topic_id, kind,
+                          actor, body, row["created_at"])
+        conn.execute("UPDATE events SET hash = ? WHERE id = ?", (link, eid))
+        return eid
 
     def events_since(self, cursor: int, topic_id: int | None = None, limit: int = 200,
                      until: int | None = None) -> list[Event]:
@@ -346,6 +369,72 @@ class Store:
             Event(r["id"], r["topic_id"], r["kind"], r["actor"], json.loads(r["payload"]), r["created_at"])
             for r in rows
         ]
+
+    def verify_chain(self) -> dict:
+        """Walk the chain and say where, if anywhere, it stops adding up.
+
+        Reports the unchained prefix rather than hiding it: a board that existed
+        before this was written cannot be made tamper-evident retroactively, and
+        saying so is the difference between a check and a decoration.
+        """
+        rows = self.q("SELECT * FROM events ORDER BY id")
+        unchained = 0
+        prev = None
+        for row in rows:
+            if row["hash"] is None:
+                unchained += 1
+                continue
+            want = chain_hash(prev, int(row["id"]), row["topic_id"], row["kind"],
+                              row["actor"], row["payload"], row["created_at"])
+            if want != row["hash"]:
+                return {"ok": False, "broken_at": int(row["id"]),
+                        "checked": len(rows) - unchained, "unchained": unchained}
+            prev = row["hash"]
+        return {"ok": True, "broken_at": None,
+                "checked": len(rows) - unchained, "unchained": unchained}
+
+    def verify_bodies(self) -> list[int]:
+        """Message ids whose text no longer matches what was announced."""
+        bad = []
+        for ev in self.q("SELECT * FROM events WHERE kind = 'message'"):
+            payload = json.loads(ev["payload"])
+            want, mid = payload.get("digest"), payload.get("message_id")
+            if not want or not mid:
+                continue
+            row = self.q1("SELECT body FROM messages WHERE id = ?", (mid,))
+            if row is None:
+                bad.append(int(mid))
+                continue
+            if hashlib.sha256(row["body"].encode("utf-8")).hexdigest() != want:
+                bad.append(int(mid))
+        return bad
+
+    def verify_decisions(self) -> list[dict]:
+        """Sign-offs whose row no longer matches the event that recorded them.
+
+        The chain covers events, and a proposal's verdict lives in a column
+        beside them: `UPDATE proposals SET decided_by = ...` left an intact chain
+        and a different name against the one act this project exists to
+        attribute. Checked against the event's own actor, which is the record.
+        """
+        wrong = []
+        for ev in self.q("SELECT * FROM events WHERE kind = 'decision' ORDER BY id"):
+            payload = json.loads(ev["payload"])
+            pid = payload.get("proposal_id")
+            if pid is None:
+                continue
+            row = self.q1("SELECT decided_by, status FROM proposals WHERE id = ?", (pid,))
+            if row is None:
+                wrong.append({"proposal_id": pid, "expected": ev["actor"],
+                              "found": "the proposal is gone"})
+                continue
+            if row["decided_by"] != ev["actor"]:
+                wrong.append({"proposal_id": pid, "expected": ev["actor"],
+                              "found": row["decided_by"]})
+            elif payload.get("status") and row["status"] != payload["status"]:
+                wrong.append({"proposal_id": pid, "expected": payload["status"],
+                              "found": row["status"]})
+        return wrong
 
     def head(self) -> int:
         row = self.q1("SELECT COALESCE(MAX(id), 0) AS h FROM events")
@@ -1330,8 +1419,11 @@ class Store:
                 else []
             )
 
+            # The body lives in another table, so the chain would not notice it
+            # being rewritten. Its digest travels in the event that announces it.
             ev = self._emit(c, topic_id, "message", author,
                             {"message_id": msg_id, "kind": kind, "preview": body[:280],
+                             "digest": hashlib.sha256(body.encode("utf-8")).hexdigest(),
                              "mentions": mentioned})
             # The author has by definition seen everything up to its own message.
             c.execute("UPDATE seats SET last_seen = MAX(last_seen, ?) WHERE topic_id = ? AND agent = ?",
