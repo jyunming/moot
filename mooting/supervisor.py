@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from .drivers.base import Driver, Seat, WakeResult
-from .store import Store
+from .store import Store, StoreError
 
 log = logging.getLogger("mooting.supervisor")
 
@@ -131,8 +131,10 @@ FRAMING = {
         "enough that one agent can finish each in a single sitting, and assign "
         "each to the seat best suited to it -- use `mooting_assign`. Give every task "
         "an acceptance line, so 'done' is checkable rather than a matter of "
-        "opinion. Nothing runs until a human approves your plan, so put the whole "
-        "plan up at once. When work comes back, review it and use "
+        "opinion. When one task must follow another -- they touch the same files, "
+        "or one needs the other's output -- say so with `depends_on`, because "
+        "ordering written in the plan text is not read by anything. Nothing runs "
+        "until a human approves your plan, so put the whole plan up at once. When work comes back, review it and use "
         "`mooting_task_update(id, \"accepted\"|\"assigned\"|\"rejected\", why)` -- "
         "`assigned` sends it back to be done again, and `rejected` abandons it "
         "for good."
@@ -594,9 +596,33 @@ class Supervisor:
                 self.store.update_task(int(t["id"]), agent, "blocked",
                                        "assignee has no execute capability")
                 continue
+            if t["depends_on"] and not self._done(topic_id, int(t["depends_on"])):
+                continue                 # its turn comes when the one before closes
             if self._has_budget(topic_id, agent):
                 out.append(t)
-        return out
+
+        # One task per seat. A seat is a single CLI holding a single
+        # conversation, so two simultaneous wakes are close to always wrong --
+        # observed live: agy woken for two of its own tasks at once timed out on
+        # both, while the same invocation by hand succeeded in 43 seconds. It is
+        # also the most expensive way to be wrong, since a stateless seat pays
+        # its whole input again on each.
+        first_per_seat, seen = [], set()
+        for t in out:
+            if t["assignee"] in seen:
+                continue
+            seen.add(t["assignee"])
+            first_per_seat.append(t)
+        # `--sequential` reads as though it covers this and did not: it was
+        # consulted only on the speaking path, so work ran in parallel anyway.
+        return first_per_seat[:1] if self.turn_taking == "sequential" else first_per_seat
+
+    def _done(self, topic_id: int, task_id: int) -> bool:
+        """Whether the task another one waits on has been accepted."""
+        try:
+            return self.store.task(task_id)["status"] == "accepted"
+        except StoreError:
+            return True          # a dependency that no longer exists blocks nothing
 
     def _ensure_workspace(self, topic_id: int, task) -> None:
         """A branch and an isolated checkout per task.

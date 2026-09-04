@@ -328,7 +328,8 @@ class Store:
                                    ("wakes", "tokens_in", "INTEGER"),
                                    ("wakes", "tokens_out", "INTEGER"),
                                    ("wakes", "cost_usd", "REAL"),
-                                   ("tasks", "base_sha", "TEXT")):
+                                   ("tasks", "base_sha", "TEXT"),
+                                   ("tasks", "depends_on", "INTEGER")):
             cols = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
             if column not in cols:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
@@ -1775,7 +1776,8 @@ class Store:
         return bool(row) and row["role"] == "manager"
 
     def draft_task(self, topic_id: int, manager: str, assignee: str, title: str,
-                   body: str = "", acceptance: str = "") -> int:
+                   body: str = "", acceptance: str = "",
+                   depends_on: int | None = None) -> int:
         """A manager writes a task. It is a *draft*: nothing runs until a human
         approves the plan. Assign-rights are checked here rather than asked for in
         a prompt, for the same reason `decide` checks humanity -- an instruction is
@@ -1788,9 +1790,10 @@ class Store:
             raise StoreError(f"{assignee!r} holds no seat on this topic")
         with self.tx() as c:
             cur = c.execute(
-                """INSERT INTO tasks (topic_id, title, body, acceptance, assignee, created_by)
-                   VALUES (?,?,?,?,?,?)""",
-                (topic_id, title, body, acceptance, assignee, manager),
+                """INSERT INTO tasks (topic_id, title, body, acceptance, assignee,
+                                        created_by, depends_on)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (topic_id, title, body, acceptance, assignee, manager, depends_on),
             )
             tid = int(cur.lastrowid)
             self._emit(c, topic_id, "task", manager,

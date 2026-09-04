@@ -900,7 +900,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--effort", choices=["low", "medium", "high"],
                    help="council-wide effort for this run (default low)")
     p.add_argument("--sequential", action="store_true",
-                   help="one seat at a time so each sees the last; slower by ~N x")
+                   help="one seat at a time so each sees the last, and one task "
+                        "at a time on a work topic; slower by ~N x")
     p.set_defaults(fn=cmd_run)
 
     p = sub.add_parser("nudge", help="wake one seat by hand")

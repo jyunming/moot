@@ -220,7 +220,7 @@ def mooting_pass(topic: str, why: str = "nothing to add") -> str:
 
 @mcp.tool()
 def mooting_assign(topic: str, agent: str, title: str, body: str = "",
-                 acceptance: str = "") -> str:
+                 acceptance: str = "", depends_on: int | None = None) -> str:
     """Draft a task for one teammate. Manager only, on a work topic.
 
     The task is a *draft*: it does not run, and nobody is woken for it, until a
@@ -230,10 +230,16 @@ def mooting_assign(topic: str, agent: str, title: str, body: str = "",
     Assign to the seat actually suited to the work, and only to seats registered
     with execute capability; a task assigned to a deliberation-only seat comes
     back blocked rather than silently doing nothing.
+
+    `depends_on` is the task id this one must follow -- use it when they touch
+    the same files, or when this one needs the other's output. It waits until
+    that task is accepted. Ordering written into the plan text instead is not
+    read by anything and will run in parallel.
     """
     tid = _topic_id(topic)
     try:
-        task_id = board().draft_task(tid, AGENT, agent, title, body, acceptance)
+        task_id = board().draft_task(tid, AGENT, agent, title, body, acceptance,
+                                     depends_on)
     except StoreError as exc:
         return f"refused: {exc}"
     return (f"task #{task_id} drafted for {agent}. It stays a draft until a human "

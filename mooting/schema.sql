@@ -199,6 +199,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- blocked  : worker cannot proceed and said why
     -- accepted / rejected : the manager's verdict
     status      TEXT NOT NULL DEFAULT 'draft',
+    -- The task this one must follow. A manager that works out two tasks touch
+    -- the same files -- exactly the reasoning you want from it -- could only
+    -- write that down in prose, where nothing read it.
+    depends_on  INTEGER REFERENCES tasks(id),
     proposal_id INTEGER REFERENCES proposals(id),   -- the plan gate
     branch      TEXT,                       -- work lands here, never on main
     worktree    TEXT,                       -- isolated checkout for this task

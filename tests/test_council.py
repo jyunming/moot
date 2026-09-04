@@ -2008,3 +2008,90 @@ def test_a_room_cannot_answer_a_request_by_its_number(board):
     assert board.pairing_by_ref(str(pid), chat_id="-100111") is None
     # A terminal may still use the number: it sees the whole board regardless.
     assert board.pairing_by_ref(str(pid)) is not None
+
+
+# --------------------------------------------------------------- issue #6
+
+
+def _work(board):
+    topic = open_debate(board)
+    with board.tx() as c:
+        c.execute("UPDATE topics SET mode = 'work' WHERE id = ?", (topic,))
+        c.execute("UPDATE seats SET role = 'manager' WHERE topic_id = ? AND agent = 'claude'",
+                  (topic,))
+    # Written the way `agents add --capability execute` writes it.
+    with board.tx() as c:
+        for name in ("claude", "codex", "gemini"):
+            c.execute("UPDATE agents SET driver_cfg = ? WHERE name = ?",
+                      ('{"capability": "execute"}', name))
+    return topic
+
+
+def _queue(board, topic, assignee, depends_on=None):
+    with board.tx() as c:
+        cur = c.execute("INSERT INTO tasks (topic_id, title, assignee, created_by, "
+                        "status, depends_on) VALUES (?,?,?,?,'assigned',?)",
+                        (topic, f"work for {assignee}", assignee, "claude", depends_on))
+        return int(cur.lastrowid)
+
+
+def test_one_seat_is_never_woken_twice_at_once(board):
+    """agy woken for two of its own tasks timed out on both, while the same
+    invocation by hand succeeded in 43 seconds. A seat is one CLI holding one
+    conversation."""
+    from mooting.supervisor import Caps, Supervisor
+
+    topic = _work(board)
+    _queue(board, topic, "gemini")
+    _queue(board, topic, "gemini")
+    _queue(board, topic, "codex")
+
+    runnable = Supervisor(board, {}, Caps())._runnable_tasks(topic)
+    assignees = [t["assignee"] for t in runnable]
+
+    assert sorted(assignees) == ["codex", "gemini"], assignees
+    assert len(assignees) == len(set(assignees)), "a seat was dispatched twice"
+
+
+def test_a_task_waits_for_the_one_it_follows(board):
+    """The manager could work out that two tasks touch the same files and could
+    only write it where nothing read it."""
+    from mooting.supervisor import Caps, Supervisor
+
+    topic = _work(board)
+    first = _queue(board, topic, "codex")
+    second = _queue(board, topic, "gemini", depends_on=first)
+    sup = Supervisor(board, {}, Caps())
+
+    assert [t["id"] for t in sup._runnable_tasks(topic)] == [first]
+
+    board.update_task(first, "codex", "done")
+    board.update_task(first, "claude", "accepted", "good")
+    assert [t["id"] for t in sup._runnable_tasks(topic)] == [second]
+
+
+def test_a_dependency_has_to_name_a_real_task(board):
+    """The column carries a foreign key, so "after #9999" cannot be written at
+    all -- better than depending on the loop to cope with it later."""
+    import sqlite3
+
+    topic = _work(board)
+    with pytest.raises(sqlite3.IntegrityError):
+        _queue(board, topic, "codex", depends_on=9999)
+
+
+def test_sequential_covers_work_too(board):
+    """The flag read as though it would help and was consulted only on the
+    speaking path, so work ran in parallel anyway."""
+    from mooting.supervisor import Caps, Supervisor
+
+    topic = _work(board)
+    _queue(board, topic, "codex")
+    _queue(board, topic, "gemini")
+
+    parallel = Supervisor(board, {}, Caps())._runnable_tasks(topic)
+    one_at_a_time = Supervisor(board, {}, Caps(),
+                               turn_taking="sequential")._runnable_tasks(topic)
+
+    assert len(parallel) == 2
+    assert len(one_at_a_time) == 1
