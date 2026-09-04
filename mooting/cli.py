@@ -14,15 +14,34 @@ import os
 import sys
 from pathlib import Path
 
+from . import __version__
 from .store import (NotAuthorised, Store, StoreError, agenda_points,
                     agenda_text, connect, split_points)
 
 DIM_, RESET_ = "\033[2m", "\033[0m"
 
-# A console whose default codepage is not UTF-8 would garble non-ASCII output.
+# A console whose default codepage is not UTF-8 would garble non-ASCII output --
+# and stdin was left out of this for a long time, which was worse. `-` input was
+# decoded with the locale codec: bytes that map to cp1252 became mojibake stored
+# without complaint, and bytes that do not became lone surrogates that failed at
+# the SQLite write, three layers below the mistake. Reported as issue #2.
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stdin, "reconfigure"):
+    sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+
+
+def read_stdin(what: str) -> str:
+    """Text piped in for a `-` argument.
+
+    Named rather than inlined so the four call sites cannot drift apart, and so
+    the failure says which argument was being read.
+    """
+    try:
+        return sys.stdin.read()
+    except UnicodeDecodeError as exc:
+        raise SystemExit(f"mooting: {what} is not valid UTF-8 ({exc})") from exc
 
 
 def _board(args: argparse.Namespace) -> Store:
@@ -182,7 +201,7 @@ def cmd_topic_new(args) -> int:
     board = _board(args)
     brief = args.brief
     if brief == "-":
-        brief = sys.stdin.read()
+        brief = read_stdin("--brief")
     seats = [s.strip() for s in args.seats.split(",") if s.strip()]
     who = _human(board, args.as_)
     if who not in seats:
@@ -242,7 +261,7 @@ def cmd_topic_agenda(args) -> int:
         replacing = args.set is not None
         text = args.set if replacing else " ".join(args.points)
         if text.strip() == "-":
-            text = sys.stdin.read()
+            text = read_stdin("the agenda")
         added = split_points(text)
         points = added if replacing else [*points, *added]
         board.set_brief(tid, agenda_text(points), _human(board, args.as_))
@@ -338,7 +357,7 @@ def cmd_say(args) -> int:
     board = _board(args)
     who = _human(board, args.as_)
     t = board.topic(int(args.topic) if args.topic.isdigit() else args.topic)
-    body = sys.stdin.read() if args.body == "-" else args.body
+    body = read_stdin("the message") if args.body == "-" else args.body
     mid = board.post(int(t["id"]), who, body, count_turn=False)
     print(f"posted #{mid} as {who}")
     return 0
@@ -349,7 +368,7 @@ def cmd_ask(args) -> int:
     board = _board(args)
     who = _human(board, args.as_)
     t = board.topic(int(args.topic) if args.topic.isdigit() else args.topic)
-    question = sys.stdin.read() if args.question == "-" else args.question
+    question = read_stdin("the question") if args.question == "-" else args.question
     mid = board.ask(int(t["id"]), who, args.agent, question)
     print(f"asked {args.agent} (#{mid}). They are next in line.")
     print(f"next: mooting nudge {t['slug']} {args.agent}    (or `mooting run {t['slug']}`)")
@@ -725,6 +744,8 @@ def cmd_doctor(args) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="mooting", description=__doc__.splitlines()[0])
+    ap.add_argument("--version", action="version", version=f"mooting {__version__}",
+                    help="which version this is, for a bug report")
     ap.add_argument("--db", help="board path (default ./.mooting/board.db, or $MOOTING_DB)")
     ap.add_argument("--as", dest="as_", help="act as this human seat (or $MOOTING_HUMAN)")
     sub = ap.add_subparsers(dest="cmd", required=True)

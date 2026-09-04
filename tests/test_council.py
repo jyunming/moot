@@ -1765,3 +1765,81 @@ def test_events_written_before_the_chain_are_reported_not_hidden(board):
     assert chain["unchained"] >= 2, "the old rows were not reported as unchecked"
     assert chain["checked"] >= 1
     assert chain["ok"], "an unchained prefix is not a broken chain"
+
+
+# ------------------------------------------------------------- issue #2
+#
+# `cli.py` reconfigured stdout and stderr to UTF-8 and left stdin on the locale
+# codec. Piped UTF-8 was decoded as cp1252: bytes with a mapping became mojibake
+# stored without complaint, and bytes without one became lone surrogates that
+# failed at the SQLite write, three layers below the mistake.
+
+
+def test_piped_utf8_survives_the_read(tmp_path, monkeypatch):
+    """The read side is reconfigured, so `-` input arrives as it was written."""
+    import io
+    import sys
+
+    from mooting.cli import read_stdin
+
+    # `丁` is U+4E01: its UTF-8 is E4 B8 81, and 0x81 is one of the five bytes
+    # cp1252 leaves undefined, which is what produced the surrogate.
+    raw = io.TextIOWrapper(io.BytesIO("丁 split units".encode("utf-8")),
+                           encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", raw)
+    got = read_stdin("--brief")
+
+    assert got == "丁 split units"
+    got.encode("utf-8")           # would raise if a surrogate had come through
+
+
+def test_a_bad_read_names_the_argument(tmp_path, monkeypatch):
+    """The traceback used to point at `open_topic`, three layers from the cause."""
+    import io
+    import sys
+
+    from mooting.cli import read_stdin
+
+    raw = io.TextIOWrapper(io.BytesIO(b"\xff\xfe not utf-8"), encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", raw)
+
+    with pytest.raises(SystemExit) as caught:
+        read_stdin("--brief")
+    assert "--brief" in str(caught.value), "the failure did not say what it was reading"
+
+
+def test_surrogates_are_refused_where_they_enter_the_board(board):
+    """They arrive from anywhere text is decoded with `surrogateescape`, not only
+    from stdin, and they survived every layer until SQLite refused them."""
+    from mooting.store import clean_text
+
+    bad = "split units \udc81 win"
+    with pytest.raises(StoreError) as caught:
+        clean_text(bad, "the brief")
+    assert "the brief" in str(caught.value)
+
+    topic = open_debate(board)
+    with pytest.raises(StoreError):
+        board.post(topic, "claude", bad, count_turn=False)
+    with pytest.raises(StoreError):
+        board.propose(topic, "claude", "fine", bad)
+    with pytest.raises(StoreError):
+        board.open_topic("bad", bad, "b", "human", seats=("claude",))
+
+
+def test_ordinary_text_passes_through_untouched(board):
+    from mooting.store import clean_text
+
+    for text in ("丁 split units", "", "plain ascii", "emoji 🙂 and ünïcode"):
+        assert clean_text(text, "the message") == text
+
+
+def test_the_version_has_one_answer():
+    """Three disagreed -- 0.0.1 in the package, 0.1.1 in pyproject, 0.1.0
+    installed -- so a report could not say which version it was against."""
+    import importlib.metadata
+
+    import mooting
+
+    assert mooting.__version__ == importlib.metadata.version("mooting")
+    assert mooting.__version__ != "0.0.1", "the hand-maintained literal is back"

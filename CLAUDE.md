@@ -92,6 +92,13 @@ profession, none of which was anywhere on the board. `cwd` is the seat's context
 and should say nothing; `repo` is what work topics branch from. `mooting doctor`
 reports a seat pointed somewhere with notes in it.
 
+**Output was reconfigured to UTF-8 and input was not.** `cli.py` set stdout and
+stderr and left `sys.stdin` on the locale codec, so piped UTF-8 came back through
+cp1252: bytes with a mapping became mojibake stored without complaint, and bytes
+without one became lone surrogates that failed at the SQLite write three layers
+below the mistake. Both sides now, and `clean_text` refuses surrogates where
+text enters the board rather than where it is finally written.
+
 **Tests that chdir still write to the real home directory.** `default_db_path`
 centralises boards under `~/.mooting/boards`, so a test that only monkeypatches
 the cwd leaves a board behind every run. Patch `mooting.store.HOME_BOARDS` too.

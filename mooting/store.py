@@ -149,6 +149,27 @@ class StoreError(RuntimeError):
     pass
 
 
+def clean_text(value: str, what: str) -> str:
+    """User text on its way onto the board, or a message naming what was wrong.
+
+    Surrogates arrive from anywhere text is decoded with `surrogateescape` -- a
+    mis-set locale, argv on some shells, a file read loosely. They survive every
+    layer until SQLite refuses them, and the traceback then points at the write
+    rather than at the read. Refused here, where the offending input still has a
+    name.
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise StoreError(
+            f"{what} is not valid text: it carries bytes that were decoded with "
+            f"the wrong encoding (position {exc.start}). If it was piped in, the "
+            f"source is not UTF-8.") from exc
+    return value
+
+
 def chain_hash(prev: str | None, eid: int, topic_id, kind: str, actor: str,
                payload: str, created_at: str) -> str:
     """One link. Covers the row and the link before it, so an edit anywhere
@@ -601,6 +622,8 @@ class Store:
             raise StoreError(
                 f"slug {slug!r} is all digits, which would be read as a topic id. "
                 "Give it a word -- e.g. `plans-2026`.")
+        title = clean_text(title, "the title")
+        brief = clean_text(brief, "the brief")
         if mode not in TOPIC_MODES:
             raise StoreError(f"unknown mode {mode!r}; expected one of {sorted(TOPIC_MODES)}")
         with self.tx() as c:
@@ -1372,6 +1395,7 @@ class Store:
         `count_turn` is False for system notes and for human interjections -- a
         human joining the discussion must never consume an agent's metered turns.
         """
+        body = clean_text(body, "the message")
         topic = self.topic(topic_id)
         if topic["status"] not in {"open", "paused"}:
             raise StoreError(f"topic {topic['slug']} is {topic['status']}; not accepting posts")
@@ -1538,6 +1562,7 @@ class Store:
     # ---------------------------------------------------------------- proposals
 
     def propose(self, topic_id: int, author: str, title: str, body: str) -> int:
+        title, body = clean_text(title, "the title"), clean_text(body, "the body")
         with self.tx() as c:
             cur = c.execute(
                 "INSERT INTO messages (topic_id, author, kind, body) VALUES (?,?,'propose',?)",
